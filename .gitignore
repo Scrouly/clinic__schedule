@@ -1,0 +1,33 @@
+# ── Данные (ФИО сотрудников, графики, организация) ──
+Табели/
+Копии/
+data/
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+~$*
+
+# ── Локальное состояние и логи (пути и ФИО) ──
+gui_state.json
+*.log
+*.bak
+
+# ── Сборка ──
+build/
+dist/
+*.spec
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+*.egg-info/
+
+# ── IDE / ОС ──
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
