@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from rapidfuzz import fuzz
 
 from .config import CONFIG, HOLIDAYS
+from . import norms
 
 # Регулярное выражение для поиска ФИО (например, "Иванов И.И." или "Иванов И.")
 # ВАЖНО: якорь $ добавлен, но сам по себе он не решает главную проблему —
@@ -53,6 +54,14 @@ def is_doctor_name_row(value) -> bool:
 UNICODE_DASHES = r'[\-\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]'
 FULL_DAY_ALIASES = {'круглосуточно', '24/7', 'весь день', 'all day'}
 
+# 'H,MM-H,MM' → 'H:MM-H:MM'. Запятая внутри интервала — десятичный разделитель
+# минут ('9,30-18,00'), а не разделитель интервалов. Заменяем её только если
+# ОБЕ стороны интервала имеют форму H,MM: иначе '9-12,14-18' (два интервала:
+# 9–12 и 14–18) был бы склеен неправильно.
+_DECIMAL_COMMA_INTERVAL_RE = re.compile(
+    r'(?<![\d:,])(\d{1,2}),(\d{2})(\s*' + UNICODE_DASHES + r'\s*)(\d{1,2}),(\d{2})(?![\d:])'
+)
+
 
 # ─────────────────────────────────────────────
 # Нормализация одной части времени
@@ -63,11 +72,9 @@ def _normalize_time_part(part: str) -> str:
     """
     part = part.strip()
 
-    # ─── ДОБАВЛЯЕМ СТРОКУ НИЖЕ ────────────────────────────────────────────────
     # Срезаем лишние знаки препинания по краям конкретной части времени
     # (превратит "08:30:" в чистые "08:30" до начала основных проверок)
     part = part.strip(':.,; ')
-    # ──────────────────────────────────────────────────────────────────────────
 
     # OCR-артефакт: буква O/o вместо цифры 0
     part = re.sub(r'[Oo]', '0', part)
@@ -205,6 +212,9 @@ def parse_time_intervals(time_str: str) -> List[Tuple[int, int]]:
 
     if time_str.lower() in FULL_DAY_ALIASES:
         return [(0, 24 * 60)]
+
+    # '9,30-18,00' → '9:30-18:00' (см. _DECIMAL_COMMA_INTERVAL_RE)
+    time_str = _DECIMAL_COMMA_INTERVAL_RE.sub(r'\1:\2\3\4:\5', time_str)
 
     intervals = []
     # Добавили \\ как разделитель
@@ -344,9 +354,15 @@ def string_similarity(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(a.lower(), b.lower()) / 100.0
 
 
-def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, year: int, month: int) -> float:
+def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, year: int, month: int,
+                           norm_rules=None) -> float:
     """
     Расчет нормы строго по закону: идеальная 5-дневка без учета переносов (transfers).
+
+    Недельная норма выбирается по специальности и ставке из таблицы
+    CONFIG["norms_by_specialty"] (см. core/norms.py). norm_rules позволяет передать
+    таблицу явно (тесты). Если таблицы нет — прежнее поведение: отдельная норма
+    uzd_norm у УЗД на полной ставке, у остальных base_norm.
     """
     title_lower = str(title_str).lower()
 
@@ -363,11 +379,11 @@ def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, ye
     else:
         fraction = 1.0
 
-    # 2. Проверка на УЗИ и полную ставку
-    if ("ультразвуков" in title_lower or "узд" in title_lower) and fraction == 1.0:
-        W = float(uzd_norm)
-    else:
-        W = float(base_norm)
+    # 2. Недельная норма для этой специальности и ставки (доля ставки уже учтена)
+    rules = norm_rules if norm_rules is not None else CONFIG.get("norms_by_specialty")
+    if rules is None:
+        rules = norms.legacy_rules(uzd_norm)
+    W_dec = norms.weekly_norm_for(title_str, fraction, base_norm, rules)
 
     # Берем ТОЛЬКО праздники, переносы для нормы не нужны!
     holidays = set(tuple(h) for h in CONFIG.get("holidays_by", []))
@@ -406,15 +422,13 @@ def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, ye
                 D_o += 1
 
     # 4. СТРОГАЯ МАТЕМАТИКА через Decimal
-    W_dec = Decimal(str(W))
     daily_hours = W_dec / Decimal('5')
 
     D_o_dec = Decimal(str(D_o))
     D_p_dec = Decimal(str(D_p))
 
-    base_norm_calc = (D_o_dec * daily_hours) + (D_p_dec * (daily_hours - Decimal('1')))
-
-    val = base_norm_calc * Decimal(str(fraction))
+    # Предпраздничное сокращение (−1 ч на полную ставку) пропорционально ставке
+    val = (D_o_dec * daily_hours) + (D_p_dec * (daily_hours - Decimal(str(fraction))))
     return float(val.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 def get_openpyxl_color(hex_color: str) -> Optional[str]:
