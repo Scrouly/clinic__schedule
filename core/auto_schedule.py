@@ -11,8 +11,10 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 
 # Экспортируем функции и настройки, чтобы gui_app.py мог их использовать
-from .config import CONFIG, reload_config
-from .excel_io import parse_source, write_sheet_data
+# parse_source и reload_config — РЕЭКСПОРТ: GUI вызывает auto_schedule.parse_source(...).
+# Не удалять как «неиспользуемые».
+from .config import CONFIG, reload_config  # noqa: F401
+from .excel_io import parse_source, write_sheet_data  # noqa: F401
 from .models import DiagReport, Shift, DoctorRecord
 from .utils import (
     combine_times, get_openpyxl_color, get_tags, month_info,
@@ -185,10 +187,10 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
                         'direction': r.direction, 'cabinet': r.cabinet,
                     })
                 elif workdays == 0:
-                    print(f"   ⚠️ СТАТУС: EMPTY_SCHEDULE (Нет рабочих дней)")
+                    print("   ⚠️ СТАТУС: EMPTY_SCHEDULE (Нет рабочих дней)")
                     diag.empty_schedule.append({'name': r.name, 'sheet': best_role['sheet']})
                 elif total_hours == 0:
-                    print(f"   ⚠️ СТАТУС: NO_HOURS (Рабочие дни есть, часы = 0)")
+                    print("   ⚠️ СТАТУС: NO_HOURS (Рабочие дни есть, часы = 0)")
                     diag.no_hours.append({'name': r.name, 'sheet': best_role['sheet'], 'workdays': workdays})
                 elif days_no_time:
                     print(f"   ⚠️ СТАТУС: MISSING_TIME (Нет времени для дней: {days_no_time})")
@@ -423,7 +425,9 @@ def fill_template(template_file: str, records: list[DoctorRecord], month_str: st
         _prog(0.40)
     except Exception as e:
         logger.error(f"Ошибка шаблона '{template_file}': {e}")
-        return
+        # Пробрасываем исключение: иначе GUI решит, что всё прошло успешно,
+        # и покажет «Табель готов!» без файла.
+        raise
 
     try:
         sheets = [s for s in wb.sheetnames if 'ознакомление' not in s.lower()]
@@ -488,7 +492,7 @@ def fill_template(template_file: str, records: list[DoctorRecord], month_str: st
 
             # 2. СТРОКИ С ПРЕФИКСАМИ ДЛЯ ЦВЕТНОЙ РАЗМЕТКИ В КОНСОЛИ
             logger.info("§SEP§")
-            logger.info(f"§OK§ Табель успешно сгенерирован!")
+            logger.info("§OK§ Табель успешно сгенерирован!")
             logger.info(f"§DETAIL§ Файл: {output_file}")
 
             # 3. Сигнал 100% завершения для прогресс-бара

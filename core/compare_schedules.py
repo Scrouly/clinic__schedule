@@ -10,6 +10,7 @@ import logging
 import os
 import copy
 import re
+from typing import NamedTuple
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.formatting.rule import CellIsRule
@@ -22,9 +23,25 @@ try:
 except ImportError:
     _XLCALC_AVAILABLE = False
 
-from core.utils import DR_RE, yo_to_ye, parse_time_intervals, format_intervals
+from core.utils import is_doctor_name_row, yo_to_ye, parse_time_intervals, format_intervals
 
-logger = logging.getLogger("compare_schedules")
+# Имя логгера = имя модуля ("core.compare_schedules"): GUI привязывает лог страницы
+# «Сравнение» именно к нему (см. gui/log_handler.py: COMPARE_LOGGERS).
+logger = logging.getLogger(__name__)
+
+
+class CompareResult(NamedTuple):
+    """Результат сравнения: путь к отчёту и число найденных расхождений."""
+    path: str
+    diffs: int
+
+
+def build_output_path(auto_path: str) -> str:
+    """Путь отчёта сравнения рядом с авто-шаблоном. Единственное место, где
+    формируется имя файла: его же использует GUI для проверки перезаписи."""
+    base_dir = os.path.dirname(auto_path)
+    base_name = os.path.splitext(os.path.basename(auto_path))[0]
+    return os.path.join(base_dir, f"{base_name}_СРАВНЕНИЕ_СТРУКТУРНОЕ.xlsx")
 
 
 def get_safe_cell(ws, row, col):
@@ -94,7 +111,7 @@ def parse_full_sheet_data(filepath: str) -> dict:
 
         for row in ws.iter_rows(min_row=day_row_num + 3):
             v = row[0].value
-            if v and isinstance(v, str) and DR_RE.match(v.strip()):
+            if is_doctor_name_row(v):
                 doc_name = yo_to_ye(v.strip())
                 hours_row = row[0].row
                 time_row = hours_row + 1
@@ -246,8 +263,12 @@ def clean_hours(h_str):
         return str(h_str).strip().replace(" ", "").lower()
 
 
-def compare(auto_path: str, manual_path: str):
-    """Главная функция сравнения с генерацией графического отчета."""
+def compare(auto_path: str, manual_path: str) -> CompareResult:
+    """Главная функция сравнения с генерацией графического отчета.
+
+    Возвращает CompareResult(path, diffs). При ошибке сохранения отчёта
+    выбрасывает исключение (раньше возвращала -1, и GUI показывал «найдены
+    расхождения»)."""
     logger.info("§HDR§ ЗАПУСК СТРУКТУРНОГО СРАВНЕНИЯ ГРАФИКОВ")
 
     auto_db = parse_full_sheet_data(auto_path)
@@ -292,7 +313,7 @@ def compare(auto_path: str, manual_path: str):
         first_doc_row = None
         for r in range(day_row_num + 3, ws.max_row + 1):
             v = ws.cell(row=r, column=1).value
-            if v and isinstance(v, str) and DR_RE.match(v.strip()):
+            if is_doctor_name_row(v):
                 first_doc_row = r
                 break
         if first_doc_row is None:
@@ -334,7 +355,7 @@ def compare(auto_path: str, manual_path: str):
         last_doc_row = start_clear_row
         for r in range(start_clear_row, ws.max_row + 1):
             v = ws.cell(row=r, column=1).value
-            if v and isinstance(v, str) and DR_RE.match(v.strip()):
+            if is_doctor_name_row(v):
                 last_doc_row = r + (2 if is_mibs else 1)
 
         footer_rows = []
@@ -617,9 +638,7 @@ def compare(auto_path: str, manual_path: str):
                     cell.number_format = c_data[6]
             current_row += 1
 
-    base_dir = os.path.dirname(auto_path)
-    base_name = os.path.basename(auto_path).replace(".xlsx", "")
-    output_path = os.path.join(base_dir, f"{base_name}_СРАВНЕНИЕ_СТРУКТУРНОЕ.xlsx")
+    output_path = build_output_path(auto_path)
 
     try:
         wb_report.save(output_path)
@@ -630,12 +649,16 @@ def compare(auto_path: str, manual_path: str):
 
         # 2. СТРОКИ С ПРЕФИКСАМИ ДЛЯ ЦВЕТНОЙ РАЗМЕТКИ В КОНСОЛИ
         logger.info("§SEP§")
-        logger.info(f"§OK§ График-сравнение успешно сгенерирован!")
+        logger.info("§OK§ График-сравнение успешно сгенерирован!")
         logger.info(f"§DETAIL§ Найдено расхождений в ячейках: {total_diffs_found}")
         logger.info(f"§DETAIL§ Файл: {os.path.basename(output_path)}")
 
-        return output_path
+        return CompareResult(path=output_path, diffs=total_diffs_found)
 
+    except PermissionError:
+        msg = f"Закройте файл '{os.path.basename(output_path)}' в Excel и попробуйте снова."
+        logger.error(f"Сбой сохранения файла сравнения: {msg}")
+        raise PermissionError(msg)
     except Exception as e:
         logger.error(f"Сбой сохранения файла сравнения: {e}")
-        return -1
+        raise
