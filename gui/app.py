@@ -21,7 +21,7 @@ import customtkinter as ctk
 from PIL import Image
 import logging.handlers  # noqa: E402  (нужен для RotatingFileHandler выше)
 
-from core import auto_schedule
+from core import auto_schedule, norms
 
 from . import themes as _themes_mod
 from .themes import T, THEMES
@@ -432,10 +432,10 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         # 1. Валидация норм
         np = self.norms_page
         try:
-            base_val = float(np.base_norm_entry.get().replace(",", "."))
-            uzd_val  = float(np.uzd_norm_entry.get().replace(",", "."))
-        except ValueError:
-            messagebox.showerror("Ошибка", "Нормы часов должны быть числами (например, 38.5)!")
+            base_val = norms.parse_weekly(np.base_norm_entry.get(), "Базовая норма")
+            rules    = norms.parse_norm_rules(np.get_rule_rows())
+        except norms.NormsError as e:
+            messagebox.showerror("Ошибка в нормах часов", str(e))
             return
 
         # 2. Фиксируем данные из страниц в self.cfg
@@ -454,11 +454,12 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             if k and v:
                 self.cfg["title_keywords"][k] = [w.strip() for w in v.split(",") if w.strip()]
 
+        # Норма УЗД теперь строка таблицы norms_by_specialty, а не отдельное поле
         self.cfg["hours_control"] = {
             "highlight_diff": np.highlight_var.get(),
             "base_norm":      base_val,
-            "uzd_norm":       uzd_val,
         }
+        self.cfg["norms_by_specialty"] = rules
 
         MONTH_SHORT_MAP = {
             "Янв": 1, "Фев": 2, "Мар": 3, "Апр": 4, "Май": 5, "Июн": 6,
