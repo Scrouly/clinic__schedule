@@ -13,7 +13,7 @@ from datetime import date
 
 import customtkinter as ctk
 
-from ..themes import T, MONTHS
+from ..themes import T
 from ..widgets import UIHelpersMixin
 
 MONTH_SHORT = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн",
@@ -104,7 +104,9 @@ class TransfersPage(ctk.CTkFrame, UIHelpersMixin):
         day_cb   = _mc(days,        width=70)
         month_cb = _mc(MONTH_SHORT, width=80)
         year_cb  = _mc(years,       width=90)
-        day_cb.set("01"); month_cb.set("Янв"); year_cb.set(cur_y)
+        day_cb.set("01")
+        month_cb.set("Янв")
+        year_cb.set(cur_y)
 
         def _add():
             try:

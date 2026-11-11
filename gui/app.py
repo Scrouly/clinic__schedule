@@ -9,6 +9,7 @@ app.py — CityClinicApp.
 """
 import json
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -19,7 +20,6 @@ import webbrowser
 
 import customtkinter as ctk
 from PIL import Image
-import logging.handlers  # noqa: E402  (нужен для RotatingFileHandler выше)
 
 from core import auto_schedule, norms
 
@@ -159,6 +159,14 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         if not rebuild:
             self.configure(fg_color=T("BG_DEEP"))
             return
+
+        # Страницы настроек пересоздаются из self.cfg. Без этого шага всё, что
+        # пользователь поменял, но ещё не сохранил кнопкой «Сохранить настройки»
+        # (праздники, направления, нормы, переносы), пропадало при смене темы.
+        try:
+            self._snapshot_pages_into_cfg()
+        except Exception as e:
+            gen_log.warning(f"§WARN§ Не удалось сохранить несохранённые правки при смене темы: {e}")
 
         self._save_state()
         self._rebuild_ui()
@@ -428,17 +436,28 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
     # ── Сохранение конфига ────────────────────────────────────────────────────
 
-    def _save_config(self) -> None:
-        # 1. Валидация норм
-        np = self.norms_page
-        try:
-            base_val = norms.parse_weekly(np.base_norm_entry.get(), "Базовая норма")
-            rules    = norms.parse_norm_rules(np.get_rule_rows())
-        except norms.NormsError as e:
-            messagebox.showerror("Ошибка в нормах часов", str(e))
-            return
+    _MONTH_SHORT_MAP = {
+        "Янв": 1, "Фев": 2, "Мар": 3, "Апр": 4, "Май": 5, "Июн": 6,
+        "Июл": 7, "Авг": 8, "Сен": 9, "Окт": 10, "Ноя": 11, "Дек": 12,
+    }
 
-        # 2. Фиксируем данные из страниц в self.cfg
+    def _parse_transfers(self, widgets_list: list) -> list:
+        res = []
+        for day_cb, month_cb, year_cb in widgets_list:
+            try:
+                d     = int(day_cb.get())
+                m_raw = month_cb.get()
+                m = self._MONTH_SHORT_MAP[m_raw] if m_raw in self._MONTH_SHORT_MAP else int(m_raw.split()[0])
+                y = int(year_cb.get())
+                res.append([y, m, d])
+            except (ValueError, IndexError):
+                pass
+        return sorted(res, key=lambda x: (x[0], x[1], x[2]))
+
+    def _collect_page_settings(self, base_val: float, rules: list) -> None:
+        """Переносит значения со страниц настроек в self.cfg (на диск не пишет)."""
+        np = self.norms_page
+
         self.cfg["holidays_by"] = []
         for r in self.holidays_page.hol_rows:
             try:
@@ -461,26 +480,34 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         }
         self.cfg["norms_by_specialty"] = rules
 
-        MONTH_SHORT_MAP = {
-            "Янв": 1, "Фев": 2, "Мар": 3, "Апр": 4, "Май": 5, "Июн": 6,
-            "Июл": 7, "Авг": 8, "Сен": 9, "Окт": 10, "Ноя": 11, "Дек": 12,
-        }
+        self.cfg["transfers_work_days"] = self._parse_transfers(self.transfers_page.tw_rows)
+        self.cfg["transfers_rest_days"] = self._parse_transfers(self.transfers_page.tr_rows)
 
-        def parse_transfers(widgets_list: list) -> list:
-            res = []
-            for day_cb, month_cb, year_cb in widgets_list:
-                try:
-                    d    = int(day_cb.get())
-                    m_raw = month_cb.get()
-                    m = MONTH_SHORT_MAP[m_raw] if m_raw in MONTH_SHORT_MAP else int(m_raw.split()[0])
-                    y = int(year_cb.get())
-                    res.append([y, m, d])
-                except (ValueError, IndexError):
-                    pass
-            return sorted(res, key=lambda x: (x[0], x[1], x[2]))
+    def _snapshot_pages_into_cfg(self) -> None:
+        """Запоминает несохранённые правки страниц в self.cfg перед пересборкой
+        интерфейса (смена темы). Некорректный ввод в нормах не запоминается —
+        для норм остаются прежние значения, остальное переносится как есть."""
+        np = self.norms_page
+        try:
+            base_val = norms.parse_weekly(np.base_norm_entry.get(), "Базовая норма")
+            rules    = norms.parse_norm_rules(np.get_rule_rows())
+        except norms.NormsError:
+            base_val = self.cfg.get("hours_control", {}).get("base_norm", 38.5)
+            rules    = norms.rules_for_display(self.cfg)
+        self._collect_page_settings(base_val, rules)
 
-        self.cfg["transfers_work_days"] = parse_transfers(self.transfers_page.tw_rows)
-        self.cfg["transfers_rest_days"] = parse_transfers(self.transfers_page.tr_rows)
+    def _save_config(self) -> None:
+        # 1. Валидация норм
+        np = self.norms_page
+        try:
+            base_val = norms.parse_weekly(np.base_norm_entry.get(), "Базовая норма")
+            rules    = norms.parse_norm_rules(np.get_rule_rows())
+        except norms.NormsError as e:
+            messagebox.showerror("Ошибка в нормах часов", str(e))
+            return
+
+        # 2. Фиксируем данные из страниц в self.cfg
+        self._collect_page_settings(base_val, rules)
 
         # 3. Запись на диск и синхронизация
         try:
@@ -573,8 +600,11 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         month = f"{gp.month_combo.get()} {year}"
         out  = gp.out_entry.get().strip()
 
-        if not all([src, tpl, out]):
-            messagebox.showwarning("Внимание", "Заполните все поля перед запуском.")
+        empty = [name for name, value in (
+            ("«Сводный график»", src), ("«Шаблон табеля»", tpl), ("«Сохранить как»", out),
+        ) if not value]
+        if empty:
+            messagebox.showwarning("Внимание", "Не заполнено: " + ", ".join(empty) + ".")
             return
         if not os.path.exists(src):
             messagebox.showerror("Файл не найден", f"Сводный график не найден:\n{src}")
@@ -584,6 +614,15 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             return
         if not year.isdigit() or not (2000 <= int(year) <= 2100):
             messagebox.showwarning("Внимание", "Укажите корректный год (2000–2100).")
+            return
+        # Результат не должен затирать исходные файлы: иначе пропадёт шаблон или график.
+        out_key = os.path.normcase(os.path.abspath(out))
+        if out_key in (os.path.normcase(os.path.abspath(src)), os.path.normcase(os.path.abspath(tpl))):
+            messagebox.showerror(
+                "Нельзя перезаписать исходный файл",
+                "Путь в поле «Сохранить как» совпадает со сводным графиком или шаблоном.\n"
+                "Выберите другое имя файла для результата.",
+            )
             return
         if os.path.exists(out):
             if not messagebox.askyesno("Файл уже существует", f"Файл уже существует:\n{out}\n\nЗаменить его?"):

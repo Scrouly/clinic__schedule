@@ -280,12 +280,13 @@ def _print_diag_report(rep: DiagReport) -> None:
         for x in rep.empty_schedule: logger.info(f"§WARN§ {x['name']}  →  лист «{x['sheet']}»")
 
 
-    # if rep.dubious:
-    #     logger.info("§SEP§")
-    #     logger.info("§HDR§ СОМНИТЕЛЬНЫЕ НАЗНАЧЕНИЯ (возможен неверный лист)")
-    #     for x in rep.dubious:
-    #         logger.info(f"§WARN§ {x['name']}  →  лист «{x['sheet']}»  балл={x['score']:.2f}")
-    #         logger.info(f"§DETAIL§ Должность: «{x['title']}»")
+    # Сомнительных назначений бывает много (десятки) — в лог выводим только итог,
+    # полный список лежит на листе «Отчет_по_ошибкам» (см. _write_diag_to_excel).
+    # Они входят в счётчик «С предупреждениями», поэтому без этой строки
+    # число в отчёте ничем не подтверждалось.
+    if rep.dubious:
+        logger.info("§SEP§")
+        logger.info(f"§WARN§ Сомнительных назначений: {len(rep.dubious)} — список на листе «Отчет_по_ошибкам»")
 
 
 def _write_diag_to_excel(wb, rep: DiagReport) -> None:
@@ -379,6 +380,13 @@ def _write_diag_to_excel(wb, rep: DiagReport) -> None:
     add_category("ПУСТОЕ РАСПИСАНИЕ", rep.empty_schedule,
                  lambda x: (f"{x['name']} (Лист: {x['sheet']})",
                             "У врача только выходные и праздники, нет ни одного рабочего дня."),
+                 bg_color="FFEB9C", font_color="9C5700")
+
+    add_category("СОМНИТЕЛЬНЫЕ НАЗНАЧЕНИЯ (проверьте лист)", rep.dubious,
+                 lambda x: (f"{x['name']} (Лист: {x['sheet']})",
+                            f"Должность в табеле: «{x['title']}». Совпадение со специальностью "
+                            f"в графике слабое (балл {x['score']:.2f}). "
+                            f"Отделение: «{x['direction']}», кабинет: «{x['cabinet']}»."),
                  bg_color="FFEB9C", font_color="9C5700")
 
     # СИНИЙ: Информационные сообщения
@@ -486,16 +494,14 @@ def fill_template(template_file: str, records: list[DoctorRecord], month_str: st
         try:
             wb.save(output_file)
 
-            # 1. ЧИСТЫЕ СТРОКИ ДЛЯ ДВИЖКА GUI (чтобы всплывало окно "Открыть сформированный график")
-            logger.info("Табель успешно сгенерирован!")
-            logger.info(f"Файл: {output_file}")
-
-            # 2. СТРОКИ С ПРЕФИКСАМИ ДЛЯ ЦВЕТНОЙ РАЗМЕТКИ В КОНСОЛИ
+            # GUI узнаёт об успехе по возврату из функции, а не по тексту лога,
+            # поэтому «чистые» дубли этих строк больше не нужны: раньше в окне лога
+            # одно и то же сообщение печаталось дважды.
             logger.info("§SEP§")
             logger.info("§OK§ Табель успешно сгенерирован!")
             logger.info(f"§DETAIL§ Файл: {output_file}")
 
-            # 3. Сигнал 100% завершения для прогресс-бара
+            # Сигнал 100% завершения для прогресс-бара
             _prog(1.0)
 
         except PermissionError:

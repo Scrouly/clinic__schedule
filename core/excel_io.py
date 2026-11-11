@@ -75,7 +75,13 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
     required = ['cabinet', 'specialist', 'header']
     missing = [k for k in required if k not in struct]
     if missing:
-        raise ValueError(f"Лист '{month_sheet}': не найдены обязательные строки-заголовки: {missing}.")
+        # Показываем подписи строк так, как они выглядят в Excel, а не внутренние ключи.
+        row_labels = {'cabinet': 'Кабинет', 'specialist': 'Специалист', 'header': 'Дата'}
+        names = ", ".join(f"«{row_labels[k]}»" for k in missing)
+        raise ValueError(
+            f"Лист '{month_sheet}': в первом столбце не найдены строки {names}. "
+            f"Возможно, лист этого месяца ещё не заполнен — проверьте выбранный месяц и год."
+        )
 
     dept_idx = struct.get('department')
     cab_idx = struct['cabinet']
@@ -285,7 +291,7 @@ def _find_hours_total_col(ws, day_row_num: int) -> int:
         # Сканируем три смежные строки заголовков (например, 7, 8 и 9)
         for delta in range(3):
             val = str(ws.cell(row=day_row_num + delta, column=col).value or "").lower()
-            if "часы" in val or "часы" in val or "час" in val:
+            if "час" in val:  # покрывает «часы», «часов», «час»
                 if "норма" not in val:
                     return col
     return 36  # Безопасный фолбэк
