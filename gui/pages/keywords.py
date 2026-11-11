@@ -9,7 +9,7 @@ pages/keywords.py — страница «Направления».
 """
 import customtkinter as ctk
 
-from ..themes import T, MONTHS
+from ..themes import T
 from ..widgets import UIHelpersMixin
 
 

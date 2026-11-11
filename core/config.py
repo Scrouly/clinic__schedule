@@ -6,12 +6,19 @@ config.py — Модуль управления конфигурацией пр�
 import copy
 import json
 import os
+import sys
 
-CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..",
-    "auto_schedule_config.json"
-)
+
+def _config_dir() -> str:
+    """Папка с конфигом: в собранном .exe — рядом с программой (как в gui/app.py),
+    иначе корень проекта. Раньше core искал файл внутри временной папки сборки,
+    а GUI — рядом с .exe, то есть два разных файла."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+CONFIG_FILE = os.path.join(_config_dir(), "auto_schedule_config.json")
 
 DEFAULT_CONFIG = {
     "hours_control": {
