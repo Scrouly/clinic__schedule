@@ -25,7 +25,12 @@ from core import auto_schedule
 
 from . import themes as _themes_mod
 from .themes import T, THEMES
-from .log_handler import TextboxHandler
+from .log_handler import (
+    COMPARE_LOGGERS,
+    GENERATE_LOGGERS,
+    bind_textbox,
+    detach_all_textbox_handlers,
+)
 from .widgets import UIHelpersMixin
 from .pages.generate import GeneratePage
 from .pages.colors import ColorsPage
@@ -61,6 +66,11 @@ LOGO_PATH      = os.path.join(RESOURCE_DIR, "resources", "logo.png")
 
 
 # ── Логирование ───────────────────────────────────────────────────────────────
+
+# Логгер генерации: тот же, что у core/auto_schedule.py (его __name__).
+# Сообщения GUI об ошибках идут в него, чтобы попадать в лог страницы «Генерация».
+gen_log = logging.getLogger(GENERATE_LOGGERS[0])
+
 
 def setup_logger() -> None:
     log_file = os.path.join(APP_DIR, "auto_schedule.log")
@@ -101,9 +111,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
                 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                     json.dump(self.cfg, f, ensure_ascii=False, indent=4)
             except Exception as _e:
-                logging.getLogger("auto_schedule").warning(
-                    f"§WARN§ Не удалось создать конфиг: {_e}"
-                )
+                gen_log.warning(f"§WARN§ Не удалось создать конфиг: {_e}")
         else:
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -132,19 +140,12 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
         self._apply_theme(self._theme_name, rebuild=False)
         self._build_layout()
+        # Логи привязываются здесь и заново — в _rebuild_ui (смена темы).
+        # Раньше в __init__ ещё вешался хендлер на корневой логгер, и он не
+        # переживал пересборку интерфейса.
         self._setup_logging()
         self._load_state()
         self._nav_to("generate")
-        self.gui_logger = TextboxHandler(self.generate_page.log_box)
-        self.gui_logger.setLevel(logging.INFO)
-
-        # 2. Берем ГЛАВНЫЙ логгер программы и привязываем к нему наш обработчик
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-
-        # Защита от двойного добавления, если __init__ вызовется дважды
-        if not any(isinstance(h, TextboxHandler) for h in root_logger.handlers):
-            root_logger.addHandler(self.gui_logger)
 
     # ── Тема ──────────────────────────────────────────────────────────────────
 
@@ -166,10 +167,9 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         """Уничтожает весь интерфейс и пересоздаёт с текущей темой."""
         active = self._active
 
-        # Убираем TextboxHandler до уничтожения виджетов
-        for logger_name in ("auto_schedule", "compare_schedules"):
-            lg = logging.getLogger(logger_name)
-            lg.handlers = [h for h in lg.handlers if not isinstance(h, TextboxHandler)]
+        # Снимаем ВСЕ TextboxHandler до уничтожения виджетов — иначе они
+        # останутся привязанными к мёртвым текстовым полям.
+        detach_all_textbox_handlers()
 
         for w in self.winfo_children():
             try:
@@ -304,7 +304,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             text_color="#FFFFFF", height=36, corner_radius=8,
             command=self._save_config,
         ).pack(fill="x", padx=10, pady=(2, 6))
-        f"Разработано: t.me/Scrouly  ·  {date.today().year}"
+
         # 1. СОЗДАЕМ виджет и сохраняем его в переменную
         author_label = ctk.CTkLabel(
             sb,
@@ -347,19 +347,11 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
     # ── Логирование в виджет ──────────────────────────────────────────────────
 
     def _setup_logging(self) -> None:
-        boxes = [
-            ("auto_schedule",    self.generate_page.log_box),
-            ("compare_schedules", self.compare_page.log_box),
-        ]
-        for name, box in boxes:
-            logger = logging.getLogger(name)
-            logger.setLevel(logging.DEBUG)
-            for h in logger.handlers[:]:
-                if isinstance(h, TextboxHandler):
-                    logger.removeHandler(h)
-            h = TextboxHandler(box)
-            h.setFormatter(logging.Formatter("%(message)s"))
-            logger.addHandler(h)
+        """Привязывает лог-боксы страниц к логгерам core.* (см. gui/log_handler.py).
+        Корневой логгер не трогаем: на нём остаётся только запись в файл/консоль."""
+        detach_all_textbox_handlers()
+        bind_textbox(GENERATE_LOGGERS, self.generate_page.log_box)
+        bind_textbox(COMPARE_LOGGERS,  self.compare_page.log_box)
         self._refresh_log_tags()
 
     def _refresh_log_tags(self) -> None:
@@ -411,7 +403,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
                 if len(parts) > 1:
                     gp.year_entry.insert(0, parts[1])
         except Exception as e:
-            logging.getLogger("auto_schedule").error(f"Не удалось загрузить состояние GUI: {e}")
+            gen_log.error(f"Не удалось загрузить состояние GUI: {e}")
 
     def _save_state(self) -> None:
         try:
@@ -432,7 +424,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
                     f, ensure_ascii=False, indent=2,
                 )
         except Exception as e:
-            logging.getLogger("auto_schedule").error(f"Не удалось сохранить состояние GUI: {e}")
+            gen_log.error(f"Не удалось сохранить состояние GUI: {e}")
 
     # ── Сохранение конфига ────────────────────────────────────────────────────
 
@@ -628,7 +620,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             auto_schedule.fill_template(tpl, records, month, out, progress_cb=on_progress)
             self.after(0, self._on_success)
         except Exception as e:
-            logging.getLogger("auto_schedule").error(f"Сбой: {e}")
+            gen_log.error(f"Сбой: {e}")
             self.after(0, lambda err=e: self._on_error(err))
         finally:
             self.after(0, self._reset_ui)

@@ -16,6 +16,14 @@ log_handler.py — TextboxHandler: пишет форматированные л�
 """
 import logging
 
+# Какие логгеры core.* пишут в какую страницу GUI. Имена — это __name__ модулей
+# (core.auto_schedule, core.excel_io, core.compare_schedules). Хендлеры вешаются
+# ТОЛЬКО на них, а не на корневой логгер: иначе записи приходят дважды, логи
+# сравнения попадают на страницу генерации, а после пересборки интерфейса
+# (смена темы) корневой хендлер остаётся привязанным к уничтоженному виджету.
+GENERATE_LOGGERS = ("core.auto_schedule", "core.excel_io")
+COMPARE_LOGGERS = ("core.compare_schedules",)
+
 
 class TextboxHandler(logging.Handler):
     """Направляет записи логгера в виджет CTkTextbox с цветовым форматированием."""
@@ -96,4 +104,39 @@ class TextboxHandler(logging.Handler):
             except Exception as e:
                 print(f"[UI ERROR в TextboxHandler]: {e}")
 
-        self.textbox.after(0, append)
+        try:
+            self.textbox.after(0, append)
+        except Exception:
+            # Виджет уже уничтожен (например, при смене темы) — не роняем
+            # вызывающий код, который просто что-то залогировал.
+            self.handleError(record)
+
+
+def detach_all_textbox_handlers() -> None:
+    """Снимает все TextboxHandler со всех логгеров, включая корневой.
+    Вызывается перед уничтожением виджетов (смена темы) и перед повторной привязкой."""
+    loggers = [logging.getLogger()]
+    loggers += [lg for lg in logging.Logger.manager.loggerDict.values()
+                if isinstance(lg, logging.Logger)]
+    for lg in loggers:
+        for h in lg.handlers[:]:
+            if isinstance(h, TextboxHandler):
+                lg.removeHandler(h)
+
+
+def bind_textbox(logger_names, textbox, level: int = logging.DEBUG) -> TextboxHandler:
+    """Привязывает textbox к перечисленным логгерам (один общий хендлер).
+    Старые TextboxHandler на этих логгерах предварительно снимаются — повторный
+    вызов не создаёт дублей."""
+    handler = TextboxHandler(textbox)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    for name in logger_names:
+        lg = logging.getLogger(name)
+        for h in lg.handlers[:]:
+            if isinstance(h, TextboxHandler):
+                lg.removeHandler(h)
+        if lg.getEffectiveLevel() > level:
+            lg.setLevel(level)
+        lg.addHandler(handler)
+    return handler

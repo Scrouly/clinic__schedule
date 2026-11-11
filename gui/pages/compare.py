@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from core import compare_schedules
-from ..themes import T, MONTHS
+from ..themes import T
 from ..widgets import UIHelpersMixin
 
 
@@ -149,9 +149,9 @@ class ComparePage(ctk.CTkFrame, UIHelpersMixin):
 
         self.app._save_state()
 
-        base_dir     = os.path.dirname(auto_path)
-        base_name    = os.path.basename(auto_path).replace(".xlsx", "")
-        expected_out = os.path.join(base_dir, f"{base_name}_РАЗЛИЧИЯ.xlsx")
+        # Имя отчёта берём из core — то же самое, что реально запишет compare().
+        # Раньше здесь ожидалось «_РАЗЛИЧИЯ.xlsx», и проверка перезаписи не срабатывала.
+        expected_out = compare_schedules.build_output_path(auto_path)
 
         if os.path.exists(expected_out):
             try:
@@ -180,24 +180,24 @@ class ComparePage(ctk.CTkFrame, UIHelpersMixin):
         ).start()
 
     def _run_thread(self, auto_path: str, manual_path: str):
-        import logging
         try:
-            out_path = compare_schedules.compare(auto_path, manual_path)
-            self.after(0, lambda: self._on_success(out_path))
+            result = compare_schedules.compare(auto_path, manual_path)
+            self.after(0, lambda res=result: self._on_success(res))
         except Exception as e:
-            logging.getLogger("compare_schedules").error(f"Сбой: {e}")
+            compare_schedules.logger.error(f"Сбой: {e}")
             self.after(0, lambda err=e: self._on_error(err))
         finally:
             self.after(0, self._reset_ui)
 
-    def _on_success(self, out_path):
-        if out_path:
+    def _on_success(self, result):
+        """result — compare_schedules.CompareResult(path, diffs)."""
+        if result.diffs > 0:
             if messagebox.askyesno(
                 "Готово",
-                "Сравнение успешно завершено! Найдены расхождения.\n\nОткрыть файл с отчётом?",
+                f"Сравнение завершено. Найдено расхождений: {result.diffs}.\n\nОткрыть файл с отчётом?",
             ):
-                if os.path.exists(out_path):
-                    subprocess.Popen(f'explorer /select,"{os.path.abspath(out_path)}"')
+                if os.path.exists(result.path):
+                    subprocess.Popen(f'explorer /select,"{os.path.abspath(result.path)}"')
         else:
             messagebox.showinfo("Идеально", "Расхождений не найдено!\nШаблоны полностью совпадают по времени.")
 
