@@ -21,7 +21,7 @@ import webbrowser
 import customtkinter as ctk
 from PIL import Image
 
-from core import auto_schedule, norms
+from core import auto_schedule, dental, norms
 
 from . import themes as _themes_mod
 from .themes import T, THEMES
@@ -399,6 +399,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             for key, entry in [
                 ("src",        gp.src_entry),
                 ("tpl",        gp.tpl_entry),
+                ("dental",     gp.dental_entry),
                 ("out",        gp.out_entry),
                 ("cmp_auto",   cp.auto_entry),
                 ("cmp_manual", cp.manual_entry),
@@ -423,6 +424,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
                     {
                         "src":        gp.src_entry.get(),
                         "tpl":        gp.tpl_entry.get(),
+                        "dental":     gp.dental_entry.get(),
                         "month":      month,
                         "out":        gp.out_entry.get(),
                         "cmp_auto":   cp.auto_entry.get(),
@@ -573,6 +575,12 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             self.generate_page.tpl_entry.insert(0, fp)
             self._update_out_from_month()
 
+    def _pick_dental(self) -> None:
+        fp = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xls")])
+        if fp:
+            self.generate_page.dental_entry.delete(0, "end")
+            self.generate_page.dental_entry.insert(0, fp)
+
     def _pick_output(self) -> None:
         fp = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
         if fp:
@@ -596,6 +604,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         gp   = self.generate_page
         src  = gp.src_entry.get().strip()
         tpl  = gp.tpl_entry.get().strip()
+        dental_src = gp.dental_entry.get().strip()  # необязательный
         year = gp.year_entry.get().strip() or str(date.today().year)
         month = f"{gp.month_combo.get()} {year}"
         out  = gp.out_entry.get().strip()
@@ -612,16 +621,20 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         if not os.path.exists(tpl):
             messagebox.showerror("Файл не найден", f"Шаблон табеля не найден:\n{tpl}")
             return
+        if dental_src and not os.path.exists(dental_src):
+            messagebox.showerror("Файл не найден", f"График стоматологии не найден:\n{dental_src}")
+            return
         if not year.isdigit() or not (2000 <= int(year) <= 2100):
             messagebox.showwarning("Внимание", "Укажите корректный год (2000–2100).")
             return
         # Результат не должен затирать исходные файлы: иначе пропадёт шаблон или график.
         out_key = os.path.normcase(os.path.abspath(out))
-        if out_key in (os.path.normcase(os.path.abspath(src)), os.path.normcase(os.path.abspath(tpl))):
+        protected = [src, tpl] + ([dental_src] if dental_src else [])
+        if out_key in (os.path.normcase(os.path.abspath(p)) for p in protected):
             messagebox.showerror(
                 "Нельзя перезаписать исходный файл",
-                "Путь в поле «Сохранить как» совпадает со сводным графиком или шаблоном.\n"
-                "Выберите другое имя файла для результата.",
+                "Путь в поле «Сохранить как» совпадает со сводным графиком, графиком стоматологии "
+                "или шаблоном.\nВыберите другое имя файла для результата.",
             )
             return
         if os.path.exists(out):
@@ -637,9 +650,9 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         gp.progress.set(0)
         gp._clear_log()
 
-        threading.Thread(target=self._process, args=(src, tpl, month, out), daemon=True).start()
+        threading.Thread(target=self._process, args=(src, tpl, month, out, dental_src), daemon=True).start()
 
-    def _process(self, src: str, tpl: str, month: str, out: str) -> None:
+    def _process(self, src: str, tpl: str, month: str, out: str, dental_src: str = "") -> None:
         gp = self.generate_page
 
         def on_progress(v: float):
@@ -657,6 +670,8 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
         try:
             records = auto_schedule.parse_source(src, month, progress_cb=on_progress)
+            if dental_src:
+                records += dental.parse_dental_source(dental_src, month)
             auto_schedule.fill_template(tpl, records, month, out, progress_cb=on_progress)
             self.after(0, self._on_success)
         except Exception as e:
