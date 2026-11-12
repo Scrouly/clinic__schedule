@@ -4,6 +4,7 @@ pages/generate.py — страница «Генерация табеля».
 Публичные атрибуты (читаются из CityClinicApp):
     src_entry      — поле пути к сводному графику
     tpl_entry      — поле пути к шаблону
+    dental_entry   — поле пути к графику стоматологии (необязательное)
     month_combo    — выпадающий список месяца
     year_entry     — поле года
     out_entry      — поле пути к результату
@@ -39,14 +40,17 @@ class GeneratePage(ctk.CTkFrame, UIHelpersMixin):
 
         self.src_entry = self._file_row(fc, 0, "Сводный график", "График 2026.xlsx", self.app._pick_source)
         self.tpl_entry = self._file_row(fc, 1, "Шаблон табеля", "ГРАФИК врачи шаблон.xlsx", self.app._pick_template)
-
-        ctk.CTkFrame(fc, height=1, fg_color=T("BORDER")).grid(
-            row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=2
+        self.dental_entry = self._file_row(
+            fc, 2, "График стоматологии", "Стоматология график 2026.xlsx (необязательно)", self.app._pick_dental
         )
 
-        self._flabel(fc, "Месяц и год").grid(row=3, column=0, padx=12, pady=8, sticky="w")
+        ctk.CTkFrame(fc, height=1, fg_color=T("BORDER")).grid(
+            row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=2
+        )
+
+        self._flabel(fc, "Месяц и год").grid(row=4, column=0, padx=12, pady=8, sticky="w")
         mf = ctk.CTkFrame(fc, fg_color="transparent")
-        mf.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=6)
+        mf.grid(row=4, column=1, sticky="w", padx=(0, 10), pady=6)
 
         self.month_combo = self._combo(mf, MONTHS, width=150)
         self.month_combo.set("Март")
@@ -58,9 +62,9 @@ class GeneratePage(ctk.CTkFrame, UIHelpersMixin):
         self.year_entry.bind("<KeyRelease>", lambda _: self.app._update_out_from_month())
 
         ctk.CTkFrame(fc, height=1, fg_color=T("BORDER")).grid(
-            row=4, column=0, columnspan=3, sticky="ew", padx=10, pady=2
+            row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=2
         )
-        self.out_entry = self._file_row(fc, 5, "Сохранить как", "...ГРАФИК врачи.xlsx", self.app._pick_output, save=True)
+        self.out_entry = self._file_row(fc, 6, "Сохранить как", "...ГРАФИК врачи.xlsx", self.app._pick_output, save=True)
 
         # ── Карточка запуска
         run_card = self._card(self)

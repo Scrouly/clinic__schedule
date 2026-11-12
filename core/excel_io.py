@@ -253,6 +253,12 @@ def get_daily_hours_norm(title: str) -> Optional[float]:
 
     title_lower = title.lower()
 
+    # Стоматологи (врач-стоматолог-хирург / -ортопед) и зубные фельдшеры работают по своей
+    # норме: слова «хирург» и «ортопед» в их должности не должны включать нормы хирургов
+    # и травматологов-ортопедов.
+    if 'стоматолог' in title_lower or 'зубной' in title_lower:
+        return None
+
     if any(kw in title_lower for kw in ['узи', 'ультразвуков']):
         return 5.6
     elif any(kw in title_lower for kw in ['лор', 'оториноларинголог']):

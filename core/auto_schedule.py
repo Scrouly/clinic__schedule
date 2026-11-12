@@ -15,6 +15,7 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 # Не удалять как «неиспользуемые».
 from .config import CONFIG, reload_config  # noqa: F401
 from .excel_io import parse_source, write_sheet_data  # noqa: F401
+from . import dental
 from .models import DiagReport, Shift, DoctorRecord
 from .utils import (
     combine_times, get_openpyxl_color, get_tags, month_info,
@@ -411,7 +412,10 @@ def _write_diag_to_excel(wb, rep: DiagReport) -> None:
 # ─── ГЛАВНАЯ ФУНКЦИЯ КОНТРОЛЛЕРА ──────────────────────────────────────────────
 
 def fill_template(template_file: str, records: list[DoctorRecord], month_str: str, output_file: str, progress_cb=None):
-    """Открывает шаблон, передает данные на обработку и сохраняет итоговый файл."""
+    """Открывает шаблон, передает данные на обработку и сохраняет итоговый файл.
+
+    records — врачи из основного графика и (если задан) из графика стоматологии;
+    стоматологи отличаются признаком dental.is_dental_record()."""
 
     def _prog(v):
         if progress_cb: progress_cb(v)
@@ -475,7 +479,16 @@ def fill_template(template_file: str, records: list[DoctorRecord], month_str: st
                     })
 
         _prog(0.50)
-        doctor_found_map = _match_doctors_to_roles(template_docs, records, diag)
+
+        # Стоматология сопоставляется отдельно (по фамилии и специальности, см. core/dental.py),
+        # остальные отделения — по баллам направлений, как раньше.
+        regular_docs, dental_docs = dental.split_template_docs(template_docs)
+        regular_records = [r for r in records if not dental.is_dental_record(r)]
+        dental_records = [r for r in records if dental.is_dental_record(r)]
+
+        doctor_found_map = _match_doctors_to_roles(regular_docs, regular_records, diag)
+        for doc_name, is_found in dental.match_dental(dental_docs, dental_records, diag).items():
+            doctor_found_map[doc_name] = doctor_found_map.get(doc_name, False) or is_found
         _prog(0.75)
 
         # ДОБАВИЛИ month_str В ВЫЗОВ ФУНКЦИИ
