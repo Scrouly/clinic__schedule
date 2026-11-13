@@ -1,8 +1,7 @@
 {
     "hours_control": {
         "highlight_diff": true,
-        "base_norm": 38.5,
-        "uzd_norm": 35.0
+        "base_norm": 38.5
     },
     "excel_colors": {
         "holiday": "#FFE8F3",
@@ -14,10 +13,6 @@
         [
             1,
             1
-        ],
-        [
-            1,
-            2
         ],
         [
             1,
@@ -38,6 +33,10 @@
         [
             5,
             9
+        ],
+        [
+            6,
+            2
         ],
         [
             7,
@@ -188,5 +187,29 @@
         "min_accept_score": -0.8,
         "dubious_threshold": 1.5,
         "fuzzy_name_threshold": 0.95
-    }
+    },
+    "norms_by_specialty": [
+        {
+            "keywords": [
+                "ультразвуков",
+                "узд"
+            ],
+            "rate": 1.0,
+            "weekly": 35.0
+        },
+        {
+            "keywords": [
+                "стоматолог"
+            ],
+            "rate": 1.0,
+            "weekly": 33.0
+        },
+        {
+            "keywords": [
+                "стоматолог"
+            ],
+            "rate": null,
+            "weekly": 38.5
+        }
+    ]
 }

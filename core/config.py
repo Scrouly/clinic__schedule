@@ -18,7 +18,16 @@ def _config_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
-CONFIG_FILE = os.path.join(_config_dir(), "auto_schedule_config.json")
+def _config_file() -> str:
+    """Путь к файлу конфига. Переменная окружения CITYCLINIC_CONFIG нужна тестам и
+    скрипту tools/bench.py, чтобы не трогать настоящий конфиг; в обычной работе не задаётся."""
+    override = os.environ.get("CITYCLINIC_CONFIG")
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(_config_dir(), "auto_schedule_config.json")
+
+
+CONFIG_FILE = _config_file()
 
 DEFAULT_CONFIG = {
     "hours_control": {

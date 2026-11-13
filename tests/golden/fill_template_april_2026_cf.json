@@ -1,0 +1,138 @@
+{
+ "МИБС": [
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "greaterThan",
+   "range": "AH9",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "lessThan",
+   "range": "AH9",
+   "type": "cellIs"
+  }
+ ],
+ "Ознакомление": [],
+ "Отчет_по_ошибкам": [],
+ "Терапия": [
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$11"
+   ],
+   "operator": "greaterThan",
+   "range": "AH11",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$13"
+   ],
+   "operator": "greaterThan",
+   "range": "AH13",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "greaterThan",
+   "range": "AH9",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$11"
+   ],
+   "operator": "lessThan",
+   "range": "AH11",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$13"
+   ],
+   "operator": "lessThan",
+   "range": "AH13",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "lessThan",
+   "range": "AH9",
+   "type": "cellIs"
+  }
+ ],
+ "УЗИ": [
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "greaterThan",
+   "range": "AH9",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFA500",
+   "formula": [
+    "AND(ISNUMBER(C$9), C$9>5.5)"
+   ],
+   "operator": null,
+   "range": "C10:AF10",
+   "type": "expression"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "lessThan",
+   "range": "AH9",
+   "type": "cellIs"
+  }
+ ],
+ "Хирургия": [
+  {
+   "fill": "00C6EFCE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "greaterThan",
+   "range": "AH9",
+   "type": "cellIs"
+  },
+  {
+   "fill": "00FFA500",
+   "formula": [
+    "AND(ISNUMBER(C$9), C$9<6.16)"
+   ],
+   "operator": null,
+   "range": "C10:AF10",
+   "type": "expression"
+  },
+  {
+   "fill": "00FFC7CE",
+   "formula": [
+    "$AI$9"
+   ],
+   "operator": "lessThan",
+   "range": "AH9",
+   "type": "cellIs"
+  }
+ ]
+}
