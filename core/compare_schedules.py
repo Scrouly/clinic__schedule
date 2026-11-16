@@ -14,6 +14,7 @@ from typing import NamedTuple
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.formatting.rule import CellIsRule
+from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter
 
 try:
@@ -24,6 +25,7 @@ except ImportError:
     _XLCALC_AVAILABLE = False
 
 from core.utils import is_doctor_name_row, yo_to_ye, parse_time_intervals, format_intervals
+from core.xlstyle import style_array, styles_for
 
 # Имя логгера = имя модуля ("core.compare_schedules"): GUI привязывает лог страницы
 # «Сравнение» именно к нему (см. gui/log_handler.py: COMPARE_LOGGERS).
@@ -68,8 +70,36 @@ def to_numeric_if_possible(val_str):
 def parse_full_sheet_data(filepath: str) -> dict:
     """Парсит файл и собирает полную информацию о врачах, включая ночные смены МИБС."""
     wb = load_workbook(filepath, data_only=True)
-    evaluator = build_formula_evaluator(filepath)
-    sheets = [s for s in wb.sheetnames if 'ознакомление' not in s.lower() and 'отчет_по_ошибкам' not in s.lower()]
+    try:
+        return _parse_workbook(wb, filepath)
+    finally:
+        wb.close()
+
+
+class _LazyEvaluator:
+    """Вычислитель формул, который строится при ПЕРВОМ обращении.
+
+    Он нужен только для ячеек без сохранённого значения (файл, записанный openpyxl: у формул
+    нет кэша). Табель, сохранённый в Excel или WPS, хранит значения формул, и разбор всей
+    книги вторым проходом (xlcalculator) для него не нужен."""
+
+    def __init__(self, filepath: str):
+        self._filepath = filepath
+        self._built = False
+        self._evaluator = None
+
+    def evaluate(self, ref: str):
+        if not self._built:
+            self._built = True
+            self._evaluator = build_formula_evaluator(self._filepath)
+        if self._evaluator is None:
+            return None
+        return self._evaluator.evaluate(ref)
+
+
+def _parse_workbook(wb, filepath: str) -> dict:
+    evaluator = _LazyEvaluator(filepath)
+    sheets =[s for s in wb.sheetnames if 'ознакомление' not in s.lower() and 'отчет_по_ошибкам' not in s.lower()]
     db = {}
 
     for sheet_name in sheets:
@@ -136,12 +166,17 @@ def parse_full_sheet_data(filepath: str) -> dict:
                 totals_list = []
                 for col in total_cols:
                     val_h = ws.cell(row=hours_row, column=col).value
-                    val_t = ws.cell(row=time_row, column=col).value
                     if val_h is None:
                         val_h = eval_cell(evaluator, sheet_name, hours_row, col)
+                    if val_h is not None:
+                        totals_list.append(val_h)
+                        continue
+                    # Значение строки времени нужно, только если у строки часов его нет: так не
+                    # вызывается вычислитель формул для файлов, где итоги уже сохранены.
+                    val_t = ws.cell(row=time_row, column=col).value
                     if val_t is None:
                         val_t = eval_cell(evaluator, sheet_name, time_row, col)
-                    totals_list.append(val_h if val_h is not None else (val_t if val_t is not None else ""))
+                    totals_list.append(val_t if val_t is not None else "")
 
                 # На листе МИБС строка "ночные часы" содержит СВОЙ отдельный итог
                 # (например, отдельная сумма SUM(...) в колонке "Часы"), который
@@ -163,30 +198,47 @@ def parse_full_sheet_data(filepath: str) -> dict:
                     'totals': totals_list,
                     'night_totals': night_totals_list
                 })
-    wb.close()
     return db
 
 
 def copy_cell_styles(src_cell, dst_cell):
-    """Копирует стили оформления из одной ячейки openpyxl в другую."""
-    if src_cell.has_style:
-        dst_cell.font = copy.copy(src_cell.font)
-        dst_cell.border = copy.copy(src_cell.border)
-        dst_cell.fill = copy.copy(src_cell.fill)
-        dst_cell.alignment = copy.copy(src_cell.alignment)
-        dst_cell.number_format = src_cell.number_format
+    """Копирует стили оформления (шрифт, границы, заливку, выравнивание, формат числа)
+    из одной ячейки openpyxl в другую.
+
+    Внутри одной книги достаточно перенести пять индексов стиля: openpyxl хранит
+    одинаковые стили в общих списках книги, и присваивание объекта ``cell.font = ...``
+    в итоге делает ровно это же, но сначала копирует и сравнивает сам объект
+    (на сотнях тысяч ячеек это было основным временем compare). Защита ячейки
+    и именованный стиль, как и раньше, не копируются."""
+    if not src_cell.has_style:
+        return
+    if src_cell.parent.parent is dst_cell.parent.parent:
+        s, d = src_cell._style, dst_cell._style
+        if d is None:                       # у только что созданной ячейки массива стиля ещё нет
+            d = dst_cell._style = StyleArray()
+        d.fontId = s.fontId
+        d.borderId = s.borderId
+        d.fillId = s.fillId
+        d.alignmentId = s.alignmentId
+        d.numFmtId = s.numFmtId
+        return
+    # Ячейки из разных книг: индексы не переносимы, копируем сами объекты.
+    dst_cell.font = copy.copy(src_cell.font)
+    dst_cell.border = copy.copy(src_cell.border)
+    dst_cell.fill = copy.copy(src_cell.fill)
+    dst_cell.alignment = copy.copy(src_cell.alignment)
+    dst_cell.number_format = src_cell.number_format
 
 
 def merge_and_style_range(ws, start_row, start_col, end_row, end_col, value, font, alignment, fill, border):
     """Безопасно форматирует и объединяет диапазон ячеек."""
     get_safe_cell(ws, start_row, start_col).value = value
+    styles = styles_for(ws.parent)          # индексы стилей считаются один раз, а не на каждую ячейку
+    font, alignment, fill, border = font or None, alignment or None, fill or None, border or None
     for r in range(start_row, end_row + 1):
         for c in range(start_col, end_col + 1):
             cell = get_safe_cell(ws, r, c)
-            if font: cell.font = copy.copy(font)
-            if alignment: cell.alignment = copy.copy(alignment)
-            if fill: cell.fill = copy.copy(fill)
-            if border: cell.border = copy.copy(border)
+            styles.apply(cell, font=font, alignment=alignment, fill=fill, border=border)
             if r != start_row or c != start_col:
                 cell.value = None
     ws.merge_cells(start_row=start_row, start_column=start_col, end_row=end_row, end_column=end_col)
@@ -197,10 +249,8 @@ def style_single_cell(ws, row, col, value, font, alignment, fill, border):
     например 'Ночные часы' на листе МИБС)."""
     cell = get_safe_cell(ws, row, col)
     cell.value = value
-    if font: cell.font = copy.copy(font)
-    if alignment: cell.alignment = copy.copy(alignment)
-    if fill: cell.fill = copy.copy(fill)
-    if border: cell.border = copy.copy(border)
+    styles_for(ws.parent).apply(cell, font=font or None, alignment=alignment or None,
+                                fill=fill or None, border=border or None)
 
 
 def build_formula_evaluator(filepath: str):
@@ -404,6 +454,8 @@ def compare(auto_path: str, manual_path: str) -> CompareResult:
                 paired_docs.append({'name': m_data['name'], 'auto': None, 'manual': m_data})
 
         current_row = start_clear_row
+        bottom_border_ids: dict = {}            # прежняя граница → граница с нижней чертой
+        no_fill, no_border = PatternFill(fill_type=None), Border()
 
         for pair in paired_docs:
             a_data = pair['auto']
@@ -609,10 +661,18 @@ def compare(auto_path: str, manual_path: str) -> CompareResult:
             last_card_row = m_night_r if is_mibs else m_times_r
             for col_idx in range(1, last_table_col + 1):
                 cell = ws.cell(row=last_card_row, column=col_idx)
-                cell.border = Border(
-                    left=cell.border.left, right=cell.border.right,
-                    top=cell.border.top, bottom=Side(style='medium', color='444444')
-                )
+                # Нижняя граница зависит только от прежней границы ячейки, а их немного:
+                # результат запоминаем по номеру прежней границы.
+                old_border_id = cell._style.borderId if cell._style is not None else 0
+                new_border_id = bottom_border_ids.get(old_border_id)
+                if new_border_id is None:
+                    cell.border = Border(
+                        left=cell.border.left, right=cell.border.right,
+                        top=cell.border.top, bottom=Side(style='medium', color='444444')
+                    )
+                    bottom_border_ids[old_border_id] = cell._style.borderId
+                else:
+                    style_array(cell).borderId = new_border_id
 
             current_row = last_card_row + 1
 
@@ -620,8 +680,7 @@ def compare(auto_path: str, manual_path: str) -> CompareResult:
             for col_idx in range(1, last_table_col + 1):
                 cell = get_safe_cell(ws, current_row, col_idx)
                 cell.value = None
-                cell.fill = PatternFill(fill_type=None)
-                cell.border = Border()
+                styles_for(ws.parent).apply(cell, fill=no_fill, border=no_border)
 
             current_row += 1
 

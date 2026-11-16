@@ -21,6 +21,7 @@ from .config import CONFIG
 from .models import DoctorRecord, Shift
 from .utils import (combine_times, calculate_total_hours, normalize_time_legacy, yo_to_ye, calculate_monthly_norm,
                     is_holiday, normalize_name)
+from .xlstyle import styles_for
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +31,22 @@ def load_excel_with_merges(file_path: str, sheet_name: str) -> pd.DataFrame:
     wb = load_workbook(file_path, data_only=True)
     ws = wb[sheet_name]
 
+    # Объединённые диапазоны заполняются в массиве numpy: присваивание df.iloc[...] = значение
+    # на каждый диапазон стоило на порядок дороже (сотни диапазонов на лист).
+    values = df.to_numpy(dtype=object, copy=True)
+    n_rows, n_cols = values.shape
     for merged_cell in ws.merged_cells.ranges:
         min_col, min_row, max_col, max_row = merged_cell.bounds
         start_row, end_row = min_row - 1, max_row
         start_col, end_col = min_col - 1, max_col
 
-        if start_row < len(df) and start_col < len(df.columns):
-            end_row = min(end_row, len(df))
-            end_col = min(end_col, len(df.columns))
-            top_left_value = df.iloc[start_row, start_col]
-            df.iloc[start_row:end_row, start_col:end_col] = top_left_value
+        if start_row < n_rows and start_col < n_cols:
+            end_row = min(end_row, n_rows)
+            end_col = min(end_col, n_cols)
+            values[start_row:end_row, start_col:end_col] = values[start_row, start_col]
 
     wb.close()
-    return df
+    return pd.DataFrame(values, index=df.index, columns=df.columns, dtype=object)
 
 
 def _detect_source_rows(df: pd.DataFrame) -> dict:
@@ -156,6 +160,7 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
                      'гинекологическое': 'Гинекологическое', 'консультативное': 'Консультативное',
                      'диагностическое': 'Диагностическое', 'мибс': 'МИБС'}
 
+    cells = df.to_numpy(dtype=object)       # индексация массива вместо df.iloc[...] в циклах по дням
     records: List[DoctorRecord] = []
     for (direction, cabinet, name, spec_hint, block_id), cols in doctors_map.items():
         direction = DEPT_TYPO_MAP.get(direction.lower().strip(), direction)
@@ -172,7 +177,7 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
             for h_col in cols['hours_cols']:
                 if h_col < df.shape[1]:
                     try:
-                        hours_str = str(df.iloc[ri, h_col]).replace(',', '.').strip()
+                        hours_str = str(cells[ri, h_col]).replace(',', '.').strip()
                         hours_val += float(hours_str) if hours_str and hours_str.lower() != 'nan' else 0.0
                     except ValueError:
                         pass
@@ -180,7 +185,7 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
             daily_times = []
             for t_col in cols['time_cols']:
                 if t_col < df.shape[1]:
-                    t_str = str(df.iloc[ri, t_col]).strip()
+                    t_str = str(cells[ri, t_col]).strip()
                     if t_str and t_str.lower() not in ['nan', '0', '-', '']:
                         daily_times.append(t_str)
 
@@ -345,6 +350,7 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
                       light_gray_fill, fit_alignment, norm_col: int, hours_total_col: int, base_norm: float,
                       uzd_norm: float, highlight_enabled: bool, red_fill, green_fill) -> None:
     """Записывает расписание одного врача, включая ночные часы, и накладывает стили."""
+    styles = styles_for(ws.parent)       # индексы стилей книги считаются один раз (см. core/xlstyle.py)
     sched = role['assigned_schedule']
     data_r = role['data_r']
     time_r = role['time_r']
@@ -368,12 +374,11 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
         is_hol, is_weekend = _day_type(year_num, month_num, day, transfers_work, transfers_rest)
 
         current_fill = pink_fill if is_hol else (gray_fill if is_weekend else clear_fill)
-        dc.fill = tc.fill = current_fill
-        dc.alignment = tc.alignment = fit_alignment
+        styles.apply(dc, fill=current_fill, alignment=fit_alignment)
+        styles.apply(tc, fill=current_fill, alignment=fit_alignment)
 
         if nc:
-            nc.fill = current_fill
-            nc.alignment = fit_alignment
+            styles.apply(nc, fill=current_fill, alignment=fit_alignment)
 
         if has_records:
             add = sched.get(day, Shift())
@@ -419,7 +424,7 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
                 if time_str:
                     calc_h = calculate_total_hours(str(time_str))
                     if abs(calc_h - add.hours) > 0.04:
-                        dc.fill = mismatch_fill
+                        styles.apply(dc, fill=mismatch_fill)
                         diff = round(calc_h - add.hours, 2)
                         logger.warning(f"§WARN§ Расхождение ч/время — {norm_name}, "
                                        f"день {day:02d}: в графике {add.hours} ч., "
@@ -446,17 +451,15 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
         else:
             ws.row_dimensions[time_r].height = 22.5
 
-    light_gray = PatternFill(start_color="FFD9D9D9", end_color="FFD9D9D9", fill_type="solid")
+    # light_gray_fill — тот же светло-серый (FFD9D9D9, solid), что раньше создавался здесь заново
+    # на каждого врача.
     for day in range(days_in_month + 1, 32):
         col = get_col(day)
         if col:
-            ws.cell(row=data_r, column=col).fill = light_gray
-            ws.cell(row=time_r, column=col).fill = light_gray
-            ws.cell(row=data_r, column=col).value = None
-            ws.cell(row=time_r, column=col).value = None
-            if night_r:
-                ws.cell(row=night_r, column=col).fill = light_gray
-                ws.cell(row=night_r, column=col).value = None
+            for row in ((data_r, time_r, night_r) if night_r else (data_r, time_r)):
+                cell = ws.cell(row=row, column=col)
+                styles.apply(cell, fill=light_gray_fill)
+                cell.value = None
 
     calculated_norm = calculate_monthly_norm(title, base_norm, uzd_norm, year_num, month_num)
     cell_norm = ws.cell(row=data_r, column=norm_col)

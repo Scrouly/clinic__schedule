@@ -4,6 +4,7 @@ utils.py — Инструменты, математика времени и оч
 
 import re
 import calendar
+from functools import lru_cache
 from typing import List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -146,6 +147,7 @@ def _to_minutes(t: str) -> Optional[int]:
 # ─────────────────────────────────────────────
 # Парсинг одного интервала
 # ─────────────────────────────────────────────
+@lru_cache(maxsize=4096)     # чистая функция строки; возвращает неизменяемый кортеж или None
 def _parse_single_interval(raw: str) -> Optional[Tuple[int, int]]:
     """
     Парсит строку 'A - B' в пару минут от полуночи.
@@ -336,19 +338,29 @@ def normalize_time_legacy(shift_str: str) -> Optional[str]:
         return f"{pad(a)}-{pad(b)}"
     return shift_str
 
-def get_tags(text: str) -> set:
-    if not text or not isinstance(text, str): return set()
-    t = text.lower()
+@lru_cache(maxsize=8192)
+def _tags_for(text_lower: str, keywords_signature: tuple) -> frozenset:
     tags = set()
-    for role, keywords in CONFIG["title_keywords"].items():
-        if re.search(r'(?<![а-яёa-z])' + re.escape(role), t):
+    for role, keywords in keywords_signature:
+        if re.search(r'(?<![а-яёa-z])' + re.escape(role), text_lower):
             tags.add(role)
             continue
         for kw in keywords:
-            if re.search(r'(?<![а-яёa-z])' + re.escape(kw), t):
+            if re.search(r'(?<![а-яёa-z])' + re.escape(kw), text_lower):
                 tags.add(role)
                 break
-    return tags
+    return frozenset(tags)
+
+
+def get_tags(text: str) -> set:
+    """Специальности (ключи title_keywords), найденные в тексте.
+
+    Результат кэшируется, а в ключ кэша входит СОДЕРЖИМОЕ title_keywords (а не только текст):
+    правка ключевых слов в настройках или в тесте сразу даёт новый результат, сбрасывать
+    кэш вручную не нужно. Возвращается новый set, как и раньше — его можно менять."""
+    if not text or not isinstance(text, str): return set()
+    signature = tuple((role, tuple(words)) for role, words in CONFIG["title_keywords"].items())
+    return set(_tags_for(text.lower(), signature))
 
 def string_similarity(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(a.lower(), b.lower()) / 100.0
