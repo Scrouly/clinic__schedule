@@ -109,9 +109,9 @@ def _score_match(dir_text: str, cab_text: str, title_text: str, spec_hint: str =
 
 def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], diag: DiagReport) -> dict:
     """Алгоритм маршрутизации: сопоставляет врачей из источника с табелем."""
-    print("\n" + "═" * 80)
-    print("СТАРТ МАРШРУТИЗАЦИИ (_match_doctors_to_roles)")
-    print("═" * 80)
+    logger.debug("=" * 80)
+    logger.debug("СТАРТ МАРШРУТИЗАЦИИ (_match_doctors_to_roles)")
+    logger.debug("=" * 80)
 
     scoring = CONFIG.get("scoring", {})
     min_accept = scoring.get("min_accept_score", -0.8)
@@ -138,16 +138,16 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
         doctor_found_map[norm_name] = bool(doc_records)
 
         if not doc_records:
-            print(f"\n❌ Врач из табеля '{norm_name}' НЕ НАЙДЕН в исходных данных.")
+            logger.debug(f"Врач из табеля '{norm_name}' НЕ НАЙДЕН в исходных данных.")
             diag.not_in_source.append(norm_name)
             continue
 
         for r in doc_records:
             source_names_seen.add(r.name)
 
-            print(f"\n👨‍⚕️ ВРАЧ: {r.name}")
-            print(f"   Исходные данные -> Отделение: '{r.direction}' | Кабинет: '{r.cabinet}'")
-            print(f"   Варианты в табеле ({len(roles)} шт.):")
+            logger.debug(f"ВРАЧ: {r.name}")
+            logger.debug(f"   Исходные данные -> Отделение: '{r.direction}' | Кабинет: '{r.cabinet}'")
+            logger.debug(f"   Варианты в табеле ({len(roles)} шт.):")
 
             # Собираем все варианты и их баллы в список
             evaluated_roles = []
@@ -168,15 +168,15 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
 
                 # Ставим галочку напротив того варианта, который победит
                 is_winner = (role == best_role) and (score >= min_accept)
-                marker = "✅" if is_winner else "  "
+                marker = ">>" if is_winner else "  "
 
-                print(f"   {marker} Лист: {role['sheet']:<15} | Роль: {role['title']:<30} | Балл: {score:.2f}")
+                logger.debug(f"   {marker} Лист: {role['sheet']:<15} | Роль: {role['title']:<30} | Балл: {score:.2f}")
 
-            print("   " + "-" * 60)
+            logger.debug("   " + "-" * 60)
 
             # Итог по врачу
             if best_role is not None and best_score >= min_accept:
-                print(f"   🏆 ИТОГ: Выбрана роль '{best_role['title']}' (Лист: {best_role['sheet']})")
+                logger.debug(f"   ИТОГ: Выбрана роль '{best_role['title']}' (Лист: {best_role['sheet']})")
 
                 # Интеграция расписания
                 for day, shift in r.schedule.items():
@@ -195,29 +195,29 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
 
                 # Распределение по категориям
                 if best_score < dubious_thr:
-                    print(f"   ⚠️ СТАТУС: DUBIOUS (Сомнительное совпадение, балл < {dubious_thr})")
+                    logger.debug(f"   СТАТУС: DUBIOUS (Сомнительное совпадение, балл < {dubious_thr})")
                     diag.dubious.append({
                         'name': r.name, 'sheet': best_role['sheet'],
                         'title': best_role['title'], 'score': best_score,
                         'direction': r.direction, 'cabinet': r.cabinet,
                     })
                 elif workdays == 0:
-                    print("   ⚠️ СТАТУС: EMPTY_SCHEDULE (Нет рабочих дней)")
+                    logger.debug("   СТАТУС: EMPTY_SCHEDULE (Нет рабочих дней)")
                     diag.empty_schedule.append({'name': r.name, 'sheet': best_role['sheet']})
                 elif total_hours == 0:
-                    print("   ⚠️ СТАТУС: NO_HOURS (Рабочие дни есть, часы = 0)")
+                    logger.debug("   СТАТУС: NO_HOURS (Рабочие дни есть, часы = 0)")
                     diag.no_hours.append({'name': r.name, 'sheet': best_role['sheet'], 'workdays': workdays})
                 elif days_no_time:
-                    print(f"   ⚠️ СТАТУС: MISSING_TIME (Нет времени для дней: {days_no_time})")
+                    logger.debug(f"   СТАТУС: MISSING_TIME (Нет времени для дней: {days_no_time})")
                     diag.missing_time.append(
                         {'name': r.name, 'sheet': best_role['sheet'], 'days': sorted(days_no_time)})
                 else:
-                    print(f"   🟢 СТАТУС: OK (Расписание добавлено, часов: {total_hours})")
+                    logger.debug(f"   СТАТУС: OK (Расписание добавлено, часов: {total_hours})")
                     diag.ok.append(
                         {'name': r.name, 'sheet': best_role['sheet'], 'score': best_score, 'workdays': workdays,
                          'total_hours': total_hours})
             else:
-                print(f"   ❌ ИТОГ: ОТБРАКОВАН. Лучший балл ({best_score:.2f}) ниже проходного порога ({min_accept})")
+                logger.debug(f"   ИТОГ: ОТБРАКОВАН. Лучший балл ({best_score:.2f}) ниже проходного порога ({min_accept})")
                 sheet_name = best_role['sheet'] if best_role else '—'
                 diag.low_score.append({
                     'name': r.name, 'best_sheet': sheet_name,
@@ -225,21 +225,21 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
                 })
 
     # Проверка "потеряшек"
-    print("\n" + "═" * 80)
-    print("ПРОВЕРКА НЕРАСПРЕДЕЛЕННЫХ ВРАЧЕЙ ИЗ ИСХОДНИКА")
-    print("═" * 80)
+    logger.debug("=" * 80)
+    logger.debug("ПРОВЕРКА НЕРАСПРЕДЕЛЕННЫХ ВРАЧЕЙ ИЗ ИСХОДНИКА")
+    logger.debug("=" * 80)
     unmatched_count = 0
     for r in records:
         if r.name not in source_names_seen:
             unmatched_count += 1
-            print(
-                f"❓ Врач '{r.name}' (Напр: '{r.direction}', Каб: '{r.cabinet}') есть в исходнике, но не нужен в табеле.")
+            logger.debug(
+                f"Врач '{r.name}' (Напр: '{r.direction}', Каб: '{r.cabinet}') есть в исходнике, но не нужен в табеле.")
             diag.source_not_in_template.append(f"{r.name}  (отделение: «{r.direction}», кабинет: «{r.cabinet}»)")
 
     if unmatched_count == 0:
-        print("Все врачи из исходника распределены.")
+        logger.debug("Все врачи из исходника распределены.")
 
-    print("\nЗАВЕРШЕНИЕ МАРШРУТИЗАЦИИ\n")
+    logger.debug("ЗАВЕРШЕНИЕ МАРШРУТИЗАЦИИ")
 
     return doctor_found_map
 

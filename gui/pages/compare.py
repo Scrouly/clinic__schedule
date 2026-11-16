@@ -182,12 +182,12 @@ class ComparePage(ctk.CTkFrame, UIHelpersMixin):
     def _run_thread(self, auto_path: str, manual_path: str):
         try:
             result = compare_schedules.compare(auto_path, manual_path)
-            self.after(0, lambda res=result: self._on_success(res))
+            self.app.ui_queue.post(lambda res=result: self._on_success(res))
         except Exception as e:
             compare_schedules.logger.error(f"Сбой: {e}")
-            self.after(0, lambda err=e: self._on_error(err))
+            self.app.ui_queue.post(lambda err=e: self._on_error(err))
         finally:
-            self.after(0, self._reset_ui)
+            self.app.ui_queue.post(self._reset_ui)
 
     def _on_success(self, result):
         """result — compare_schedules.CompareResult(path, diffs)."""

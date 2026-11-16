@@ -9,7 +9,6 @@ app.py — CityClinicApp.
 """
 import json
 import logging
-import logging.handlers
 import os
 import subprocess
 import sys
@@ -29,8 +28,10 @@ from .log_handler import (
     COMPARE_LOGGERS,
     GENERATE_LOGGERS,
     bind_textbox,
+    configure_logging,
     detach_all_textbox_handlers,
 )
+from .progress import MainThreadQueue, stage_for
 from .widgets import UIHelpersMixin
 from .pages.generate import GeneratePage
 from .pages.colors import ColorsPage
@@ -73,17 +74,11 @@ gen_log = logging.getLogger(GENERATE_LOGGERS[0])
 
 
 def setup_logger() -> None:
-    log_file = os.path.join(APP_DIR, "auto_schedule.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.handlers.RotatingFileHandler(
-                log_file, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
-            ),
-            logging.StreamHandler(sys.stdout),
-        ],
-        force=True,
+    """Файл и консоль: INFO. Отладочный вывод (разбор сопоставления врачей) включается
+    переменной окружения CITYCLINIC_DEBUG=1 и пишется только в файл и консоль, не в окно."""
+    configure_logging(
+        os.path.join(APP_DIR, "auto_schedule.log"),
+        debug=os.environ.get("CITYCLINIC_DEBUG", "") not in ("", "0"),
     )
 
 setup_logger()
@@ -146,6 +141,10 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         self._setup_logging()
         self._load_state()
         self._nav_to("generate")
+
+        # Рабочие потоки не трогают Tk: они кладут задания сюда, а выполняет их главный поток.
+        self.ui_queue = MainThreadQueue(self)
+        self.ui_queue.start()
 
     # ── Тема ──────────────────────────────────────────────────────────────────
 
@@ -658,32 +657,32 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         threading.Thread(target=self._process, args=(src, tpl, month, out, dental_src), daemon=True).start()
 
     def _process(self, src: str, tpl: str, month: str, out: str, dental_src: str = "") -> None:
-        gp = self.generate_page
+        post = self.ui_queue.post
+        shown = {"stage": None}
 
-        def on_progress(v: float):
-            self.after(0, lambda val=v: gp.progress.set(val))
-            if v < 0.30:
-                self.after(0, lambda: gp.set_status("Читаю источник…",     T("ACCENT_LIGHT")))
-            elif v < 0.50:
-                self.after(0, lambda: gp.set_status("Читаю шаблон…",       T("ACCENT_LIGHT")))
-            elif v < 0.75:
-                self.after(0, lambda: gp.set_status("Сопоставляю врачей…", T("ACCENT_LIGHT")))
-            elif v < 0.92:
-                self.after(0, lambda: gp.set_status("Записываю данные…",   T("ACCENT_LIGHT")))
-            else:
-                self.after(0, lambda: gp.set_status("Сохраняю файл…",      T("ACCENT_LIGHT")))
+        def apply_progress(v: float) -> None:
+            gp = self.generate_page        # страница могла быть пересобрана сменой темы
+            gp.progress.set(v)
+            stage = stage_for(v)
+            if stage != shown["stage"]:
+                shown["stage"] = stage
+                gp.set_status(stage, T("ACCENT_LIGHT"))
+
+        def on_progress(v: float) -> None:
+            # Только последнее значение: промежуточные никому не нужны
+            self.ui_queue.post_latest("progress", lambda: apply_progress(v))
 
         try:
             records = auto_schedule.parse_source(src, month, progress_cb=on_progress)
             if dental_src:
                 records += dental.parse_dental_source(dental_src, month)
             auto_schedule.fill_template(tpl, records, month, out, progress_cb=on_progress)
-            self.after(0, self._on_success)
+            post(self._on_success)
         except Exception as e:
             gen_log.error(f"Сбой: {e}")
-            self.after(0, lambda err=e: self._on_error(err))
+            post(lambda err=e: self._on_error(err))
         finally:
-            self.after(0, self._reset_ui)
+            post(self._reset_ui)
 
     def _on_success(self) -> None:
         self.generate_page.set_status("✓  Табель готов!", T("SUCCESS"))
@@ -732,4 +731,6 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
                 return
 
         self._save_state()
+        self.ui_queue.stop()
+        detach_all_textbox_handlers()
         self.destroy()
