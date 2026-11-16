@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 from openpyxl import load_workbook
 from pydantic import ValidationError
 
-from . import excel_io
+from . import excel_io, norms
 from .config import CONFIG
 from .models import DiagReport, DoctorRecord, Shift
 from .utils import calculate_total_hours, combine_times, yo_to_ye
@@ -51,7 +51,6 @@ DEFAULT_ROLE_BY_CABINET = {
 # Латинские буквы, похожие на русские (в графике встречается «Cавчук» с латинской C).
 _LATIN_TO_CYR = str.maketrans("ABCEHKMOPTXYaceopxy", "АВСЕНКМОРТХУасеорху")
 _INITIALS_RE = re.compile(r'^[А-ЯЁ](?:\.?[А-ЯЁ])?\.?$')
-_RATE_RE = re.compile(r'\((\d+(?:[.,]\d+)?)\s*ст')
 
 
 # ── Признаки стоматологии ────────────────────────────────────────────────────
@@ -248,8 +247,7 @@ def _resolve_name(rec_name: str, template_names: List[str]) -> Optional[str]:
 def _spec(text: str) -> Tuple[set, Optional[float]]:
     """Специальность и ставка из «, врач-стоматолог-ортопед (0,25 ст)» или «… (1,0 ст.)»."""
     low = yo_to_ye(str(text or "")).lower()
-    m = _RATE_RE.search(low)
-    rate = float(m.group(1).replace(",", ".")) if m else None
+    rate = norms.rate_from_title(low)
     words = {w for w in re.split(r'[^а-яa-z]+', low.split("(")[0]) if w and w != "врач"}
     return words, rate
 

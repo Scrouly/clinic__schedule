@@ -4,6 +4,7 @@ utils.py — Инструменты, математика времени и оч
 
 import re
 import calendar
+from datetime import date
 from functools import lru_cache
 from typing import List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
@@ -268,6 +269,10 @@ def calculate_total_hours(time_str: str) -> float:
 
     return round(total_minutes / 60.0, 2)
 
+def _current_year() -> int:
+    return date.today().year
+
+
 def month_info(s: str) -> Tuple[int, int, int]:
     parts = s.strip().split()
     month_name = parts[0].lower()
@@ -279,7 +284,7 @@ def month_info(s: str) -> Tuple[int, int, int]:
             f"Допустимые значения: {valid}"
         )
     try:
-        y = int(parts[1]) if len(parts) > 1 else 2026
+        y = int(parts[1]) if len(parts) > 1 else _current_year()
     except ValueError:
         raise ValueError("Неверный формат года. Ожидается строка вида 'апрель 2026'.")
     _, d = calendar.monthrange(y, m)
@@ -362,6 +367,24 @@ def get_tags(text: str) -> set:
     signature = tuple((role, tuple(words)) for role, words in CONFIG["title_keywords"].items())
     return set(_tags_for(text.lower(), signature))
 
+_GENDER_SUFFIXES = (("ский", "ская"), ("цкий", "цкая"), ("ный", "ная"), ("ой", "ая"), ("", "а"))
+
+
+def same_surname_other_gender(name_a: str, name_b: str) -> bool:
+    """«Иванов И.И.» и «Иванова И.И.», «Ковальский» и «Ковальская» — разные люди, хотя
+    записи очень похожи и нечёткое сравнение их сливает. True, если фамилии различаются
+    только родом (инициалы не сравниваются)."""
+    sa = yo_to_ye(str(name_a).split()[0]).lower() if str(name_a).split() else ""
+    sb = yo_to_ye(str(name_b).split()[0]).lower() if str(name_b).split() else ""
+    if not sa or not sb or sa == sb:
+        return False
+    for masculine, feminine in _GENDER_SUFFIXES:
+        for m, f in ((sa, sb), (sb, sa)):
+            if m.endswith(masculine) and f.endswith(feminine) and m[:len(m) - len(masculine)] == f[:len(f) - len(feminine)]:
+                return True
+    return False
+
+
 def string_similarity(a: str, b: str) -> float:
     return fuzz.token_sort_ratio(a.lower(), b.lower()) / 100.0
 
@@ -376,20 +399,9 @@ def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, ye
     таблицу явно (тесты). Если таблицы нет — прежнее поведение: отдельная норма
     uzd_norm у УЗД на полной ставке, у остальных base_norm.
     """
-    title_lower = str(title_str).lower()
 
-    # 1. Извлекаем долю ставки
-    match = re.search(r'\((\d+)[.,](\d+)\s*ст', title_lower)
-    if not match:
-        match = re.search(r'\((\d+)\s*ст', title_lower)
-
-    if match:
-        if len(match.groups()) == 2:
-            fraction = float(f"{match.group(1)}.{match.group(2)}")
-        else:
-            fraction = float(match.group(1))
-    else:
-        fraction = 1.0
+    # 1. Извлекаем долю ставки (единый разбор — тот же, что у подсветки часов)
+    fraction = norms.rate_from_title(title_str) or 1.0
 
     # 2. Недельная норма для этой специальности и ставки (доля ставки уже учтена)
     rules = norm_rules if norm_rules is not None else CONFIG.get("norms_by_specialty")
