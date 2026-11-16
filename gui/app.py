@@ -21,7 +21,7 @@ import webbrowser
 import customtkinter as ctk
 from PIL import Image
 
-from core import auto_schedule, dental, norms
+from core import auto_schedule, cfgdiff, dental, norms, outfile
 
 from . import themes as _themes_mod
 from .themes import T, THEMES
@@ -640,6 +640,11 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         if os.path.exists(out):
             if not messagebox.askyesno("Файл уже существует", f"Файл уже существует:\n{out}\n\nЗаменить его?"):
                 return
+        try:
+            outfile.check_output_writable(out)
+        except outfile.OutputNotWritable as e:
+            messagebox.showerror("Нельзя сохранить результат", str(e))
+            return
 
         self._save_state()
         self._force_sync_config()
@@ -706,19 +711,23 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
     # ── Закрытие ──────────────────────────────────────────────────────────────
 
-    def _on_close(self) -> None:
-        saved: dict = {}
+    def _unsaved_settings(self) -> list:
+        """Разделы настроек, изменённые в окне, но не записанные в файл (все, а не только цвета)."""
         try:
+            self._snapshot_pages_into_cfg()
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f).get("excel_colors", {})
-        except Exception:
-            pass
+                saved = json.load(f)
+            return cfgdiff.unsaved_sections(self.cfg, saved)
+        except Exception as e:      # не удалось сравнить — не мешаем закрыть окно
+            gen_log.warning(f"Не удалось проверить несохранённые настройки: {e}")
+            return []
 
-        current = self.cfg.get("excel_colors", {})
-        if current != saved:
+    def _on_close(self) -> None:
+        changed = self._unsaved_settings()
+        if changed:
             if not messagebox.askyesno(
                 "Несохранённые изменения",
-                "Есть несохранённые изменения цветов.\n\nВыйти без сохранения?",
+                "Есть несохранённые изменения настроек.\n\nВыйти без сохранения?",
             ):
                 return
 

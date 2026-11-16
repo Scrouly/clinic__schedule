@@ -116,6 +116,29 @@ def rules_for_display(cfg: dict) -> List[dict]:
     return rules
 
 
+# ── Ставка из названия должности ─────────────────────────────────────────────
+
+_RATE_WITH_UNIT = re.compile(r'(?<![\d.,])(\d+(?:[.,]\d+)?)\s*ст(?![а-яa-z])')
+_RATE_BARE_DECIMAL = re.compile(r'(?<![\d.,])(\d+[.,]\d+)(?![\d])')
+
+
+def rate_from_title(title) -> Optional[float]:
+    """Единственное место, где из названия должности читается доля ставки:
+    «(1,0 ст.)», «(0,75 ст.)», «(1,25 ст.)», «0,5 ст», а также голое «0,5».
+    None — ставка не указана."""
+    if not title or not isinstance(title, str):
+        return None
+    t = title.lower()
+    m = _RATE_WITH_UNIT.search(t)
+    if m is None:
+        m = _RATE_BARE_DECIMAL.search(t)
+        if m is not None and not 0 < float(m.group(1).replace(",", ".")) <= MAX_RATE:
+            return None
+    if m is None:
+        return None
+    return float(m.group(1).replace(",", "."))
+
+
 # ── Выбор нормы ──────────────────────────────────────────────────────────────
 
 def _title_matches(title_norm: str, keywords: Sequence[str]) -> bool:

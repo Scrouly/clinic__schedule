@@ -19,7 +19,7 @@ from . import dental
 from .models import DiagReport, Shift, DoctorRecord
 from .utils import (
     combine_times, get_openpyxl_color, get_tags, month_info,
-    string_similarity, yo_to_ye, is_doctor_name_row
+    string_similarity, yo_to_ye, is_doctor_name_row, same_surname_other_gender
 )
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,17 @@ def _score_match(dir_text: str, cab_text: str, title_text: str, spec_hint: str =
                 base_score = -1.0
         else:
             base_score = -1.0
+    elif spec_hint:
+        # Ни отделение, ни кабинет специальности не называют (например, «Консультативное»):
+        # решает пометка у фамилии. Совпала с должностью — уверенное совпадение; названа другая
+        # специальность — должность чужая; пометка без специальности ничего не меняет.
+        hint_tags = get_tags(spec_hint)
+        if hint_tags:
+            intersect_hint = len(hint_tags & title_tags)
+            if intersect_hint > 0:
+                base_score = 2.0 + (intersect_hint / len(hint_tags | title_tags))
+            else:
+                base_score = -1.0
 
     if base_score >= -1.0:
         return base_score + sheet_bonus
@@ -115,8 +126,11 @@ def _match_doctors_to_roles(template_docs: dict, records: list[DoctorRecord], di
         doc_records = exact
 
         if not doc_records:
-            fuzzy_matches = [(string_similarity(norm_name, r.name), r.name) for r in records if
-                             string_similarity(norm_name, r.name) > fuzzy_thr]
+            # Фамилии, различающиеся только родом (Иванов / Иванова), — разные врачи,
+            # хотя по тексту они почти совпадают.
+            scored = ((string_similarity(norm_name, r.name), r.name) for r in records
+                      if not same_surname_other_gender(norm_name, r.name))
+            fuzzy_matches = [(score, name) for score, name in scored if score > fuzzy_thr]
             if fuzzy_matches:
                 best_match_score, best_name = max(fuzzy_matches, key=lambda x: x[0])
                 doc_records = [r for r in records if r.name == best_name]

@@ -17,6 +17,7 @@ from openpyxl.styles import PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from pydantic import ValidationError
 
+from . import norms
 from .config import CONFIG
 from .models import DoctorRecord, Shift
 from .utils import (combine_times, calculate_total_hours, normalize_time_legacy, yo_to_ye, calculate_monthly_norm,
@@ -266,7 +267,7 @@ def get_daily_hours_norm(title: str) -> Optional[float]:
 
     if any(kw in title_lower for kw in ['узи', 'ультразвуков']):
         return 5.6
-    elif any(kw in title_lower for kw in ['лор', 'оториноларинголог']):
+    elif re.search(r'(?<![а-яё])(лор|оториноларинголог)', title_lower):
         return 6.16
     elif any(kw in title_lower for kw in ['гинеколог', 'гинекология']):
         return 6.16
@@ -285,15 +286,8 @@ def get_rate_from_title(title: str) -> Optional[str]:
     if not title or not isinstance(title, str):
         return None
 
-    if '1,0' in title or '1.0' in title:
-        return '1.0'
-    if '0,75' in title or '0.75' in title:
-        return '0.75'
-    if '0,5' in title or '0.5' in title:
-        return '0.5'
-    if '0,25' in title or '0.25' in title:
-        return '0.25'
-    return None
+    fraction = norms.rate_from_title(title)
+    return {1.0: '1.0', 0.75: '0.75', 0.5: '0.5', 0.25: '0.25'}.get(fraction)
 
 
 def _find_hours_total_col(ws, day_row_num: int) -> int:
