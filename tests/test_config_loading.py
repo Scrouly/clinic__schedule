@@ -54,11 +54,12 @@ def test_test_session_does_not_use_the_real_config():
 
 # ── Создание файла ───────────────────────────────────────────────────────────
 
-def test_missing_file_is_created_with_defaults(cfg_path):
+def test_missing_file_gives_defaults_and_is_not_created_until_saved(cfg_path):
     loaded = config.load_config()
-    assert cfg_path.exists()
-    assert _read(cfg_path) == loaded
+    assert not cfg_path.exists()
     assert loaded["hours_control"] == config.DEFAULT_CONFIG["hours_control"]
+    config.save_config(loaded)
+    assert _read(cfg_path) == loaded
 
 
 def test_returned_config_is_a_deep_copy_of_defaults(cfg_path):
@@ -78,10 +79,9 @@ def test_missing_keys_are_added_and_user_values_are_kept(cfg_path):
     loaded = config.load_config()
     assert loaded["hours_control"] == {"highlight_diff": False, "base_norm": 40.0}
     assert loaded["month_ru"] == config.DEFAULT_CONFIG["month_ru"]
-    assert _read(cfg_path)["month_ru"] == config.DEFAULT_CONFIG["month_ru"]
 
 
-def test_unsorted_dates_are_sorted_and_saved(cfg_path):
+def test_unsorted_dates_are_sorted(cfg_path):
     data = copy.deepcopy(config.DEFAULT_CONFIG)
     data["holidays_by"] = [[5, 9], [1, 1], [3, 8]]
     data["transfers_work_days"] = [[2026, 5, 2], [2026, 4, 25]]
@@ -93,7 +93,13 @@ def test_unsorted_dates_are_sorted_and_saved(cfg_path):
     assert loaded["holidays_by"] == [[1, 1], [3, 8], [5, 9]]
     assert loaded["transfers_work_days"] == [[2026, 4, 25], [2026, 5, 2]]
     assert loaded["transfers_rest_days"] == [[2026, 4, 20], [2026, 6, 1]]
-    assert _read(cfg_path)["holidays_by"] == [[1, 1], [3, 8], [5, 9]]
+
+
+def test_mixed_holiday_forms_are_sorted_by_date(cfg_path):
+    data = copy.deepcopy(config.DEFAULT_CONFIG)
+    data["holidays_by"] = [[2026, 5, 9], [5, 9], [1, 1]]
+    cfg_path.write_text(json.dumps(data), encoding="utf-8")
+    assert config.load_config()["holidays_by"] == [[1, 1], [5, 9], [2026, 5, 9]]
 
 
 def test_complete_sorted_file_is_not_rewritten(cfg_path):

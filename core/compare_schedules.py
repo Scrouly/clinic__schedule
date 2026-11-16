@@ -13,6 +13,7 @@ import re
 from typing import NamedTuple
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter
@@ -327,7 +328,7 @@ def compare(auto_path: str, manual_path: str) -> CompareResult:
     wb_report = load_workbook(auto_path)
 
     for sheet_name in wb_report.sheetnames:
-        wb_report[sheet_name].conditional_formatting.__init__()
+        wb_report[sheet_name].conditional_formatting = ConditionalFormattingList()
 
     for s in list(wb_report.sheetnames):
         if 'ознакомление' in s.lower() or 'отчет_по_ошибкам' in s.lower():

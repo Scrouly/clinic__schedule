@@ -4,14 +4,15 @@ utils.py — Инструменты, математика времени и оч
 
 import re
 import calendar
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 from typing import List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
 
 from rapidfuzz import fuzz
 
-from .config import CONFIG, HOLIDAYS
+from .config import CONFIG
+from .holidays import calendar_for
 from . import norms
 
 # Регулярное выражение для поиска ФИО (например, "Иванов И.И." или "Иванов И.")
@@ -290,8 +291,10 @@ def month_info(s: str) -> Tuple[int, int, int]:
     _, d = calendar.monthrange(y, m)
     return m, y, d
 
-def is_holiday(day: int, month: int) -> bool:
-    return (month, day) in HOLIDAYS
+def is_holiday(day: int, month: int, year: Optional[int] = None) -> bool:
+    """Праздник ли день. Список читается из живого CONFIG; без года учитываются
+    только праздники «каждый год» (см. core/holidays.py)."""
+    return calendar_for(CONFIG.get("holidays_by", [])).contains(year, month, day)
 
 def yo_to_ye(s: str) -> str:
     return s.replace('ё', 'е').replace('Ё', 'Е')
@@ -410,17 +413,15 @@ def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, ye
     W_dec = norms.weekly_norm_for(title_str, fraction, base_norm, rules)
 
     # Берем ТОЛЬКО праздники, переносы для нормы не нужны!
-    holidays = set(tuple(h) for h in CONFIG.get("holidays_by", []))
+    holiday_calendar = calendar_for(CONFIG.get("holidays_by", []))
 
     _, num_days = calendar.monthrange(year, month)
     D_o, D_p = 0, 0
 
     # 3. Проходим по дням классической пятидневки
     for day in range(1, num_days + 1):
-        current_date = (month, day)
-
         # Если сам день - праздник, он не рабочий
-        if current_date in holidays:
+        if holiday_calendar.contains(year, month, day):
             continue
 
         # ПН-ПТ считаются рабочими
@@ -428,17 +429,9 @@ def calculate_monthly_norm(title_str: str, base_norm: float, uzd_norm: float, ye
         is_working_day = weekday < 5
 
         if is_working_day:
-            is_pre_holiday = False
-
-            # Завтра праздник?
-            tomorrow = day + 1
-            tmr_month = month
-            if tomorrow > num_days:
-                tomorrow = 1
-                tmr_month = month + 1 if month < 12 else 1
-
-            if (tmr_month, tomorrow) in holidays:
-                is_pre_holiday = True
+            # Завтра праздник? (31 декабря смотрит на 1 января СЛЕДУЮЩЕГО года)
+            tomorrow = date(year, month, day) + timedelta(days=1)
+            is_pre_holiday = holiday_calendar.contains(tomorrow.year, tomorrow.month, tomorrow.day)
 
             if is_pre_holiday:
                 D_p += 1

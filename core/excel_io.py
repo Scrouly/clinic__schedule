@@ -12,6 +12,7 @@ from typing import List, Optional
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
+from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -304,7 +305,7 @@ def _find_hours_total_col(ws, day_row_num: int) -> int:
 
 def _day_type(year_num: int, month_num: int, day: int, transfers_work: list, transfers_rest: list):
     """Возвращает (is_hol, is_weekend) для конкретного дня с учётом переносов."""
-    is_hol = is_holiday(day, month_num)
+    is_hol = is_holiday(day, month_num, year_num)
     is_weekend = (calendar.weekday(year_num, month_num, day) >= 5 or [year_num, month_num,
                                                                       day] in transfers_rest) and not is_hol
     if [year_num, month_num, day] in transfers_work:
@@ -537,8 +538,8 @@ def write_sheet_data(wb, sheets, sheet_configs, template_docs, doctor_found_map,
     for sheet_name in sheets:
         ws = wb[sheet_name]
 
-        # Безопасный сброс старых правил шаблона через встроенный __init__
-        ws.conditional_formatting.__init__()
+        # Сброс старых правил шаблона
+        ws.conditional_formatting = ConditionalFormattingList()
 
         config = sheet_configs.get(sheet_name)
         if not config:

@@ -319,3 +319,37 @@ def test_fill_template_styles_golden(tmp_path, april_2026):
     book = load_workbook(out)
     assert_matches_golden("fill_template_april_2026_styles", dump_styles(book))
     book.close()
+
+
+# ── старые правила условного форматирования шаблона не переживают генерацию ──
+
+def _plant_stray_rule(path):
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import PatternFill
+    book = load_workbook(path)
+    for ws in book.worksheets:
+        ws.conditional_formatting.add("Z1:Z3", CellIsRule(operator="equal", formula=["1"],
+                                                         fill=PatternFill("solid", start_color="FF0000")))
+    book.save(path)
+    book.close()
+
+
+def test_fill_template_drops_the_stray_rules_of_the_template(tmp_path, april_2026):
+    src = make_source_book(str(tmp_path / "src.xlsx"), standard_source_docs())
+    tpl = make_template_book(str(tmp_path / "tpl.xlsx"), standard_template_sheets())
+    _plant_stray_rule(tpl)
+    out = str(tmp_path / "out.xlsx")
+    auto_schedule.fill_template(tpl, excel_io.parse_source(src, SHEET), MONTH, out)
+    book = load_workbook(out)
+    assert all(str(cf.sqref) != "Z1:Z3"                       # лист «Ознакомление» fill_template не трогает
+               for name in standard_template_sheets() for cf in book[name].conditional_formatting)
+    book.close()
+
+
+def test_compare_drops_the_stray_rules_of_the_auto_file(tmp_path):
+    auto, manual = make_compare_pair(str(tmp_path / "auto.xlsx"), str(tmp_path / "manual.xlsx"))
+    _plant_stray_rule(auto)
+    result = compare_schedules.compare(auto, manual)
+    book = load_workbook(result.path)
+    assert all(str(cf.sqref) != "Z1:Z3" for ws in book.worksheets for cf in ws.conditional_formatting)
+    book.close()
