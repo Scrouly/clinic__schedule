@@ -7,6 +7,10 @@ import copy
 import json
 import os
 import sys
+import tempfile
+from typing import Optional
+
+from . import holidays
 
 
 def _config_dir() -> str:
@@ -18,7 +22,16 @@ def _config_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
-CONFIG_FILE = os.path.join(_config_dir(), "auto_schedule_config.json")
+def _config_file() -> str:
+    """Путь к файлу конфига. Переменная окружения CITYCLINIC_CONFIG нужна тестам и
+    скрипту tools/bench.py, чтобы не трогать настоящий конфиг; в обычной работе не задаётся."""
+    override = os.environ.get("CITYCLINIC_CONFIG")
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(_config_dir(), "auto_schedule_config.json")
+
+
+CONFIG_FILE = _config_file()
 
 DEFAULT_CONFIG = {
     "hours_control": {
@@ -82,68 +95,71 @@ DEFAULT_CONFIG = {
     }
 }
 
+class ConfigSaveError(Exception):
+    """Настройки не удалось записать; текст можно показывать пользователю как есть."""
+
+
 def load_config() -> dict:
+    """Читает настройки из файла и дополняет значениями по умолчанию. Файл НЕ пишется:
+    миграция и сортировка остаются в памяти, на диск попадают при ближайшем save_config()
+    (так импорт модуля ничего не создаёт и не перезаписывает)."""
     # Всегда работаем с глубокой копией — DEFAULT_CONFIG никогда не мутирует
-    defaults = copy.deepcopy(DEFAULT_CONFIG)
+    config = copy.deepcopy(DEFAULT_CONFIG)
 
-    if not os.path.exists(CONFIG_FILE):
-        defaults["holidays_by"] = sorted(
-            defaults.get("holidays_by", []), key=lambda x: (x[0], x[1])
-        )
-        defaults["transfers_work_days"] = sorted(
-            defaults.get("transfers_work_days", []), key=lambda x: (x[0], x[1], x[2])
-        )
-        defaults["transfers_rest_days"] = sorted(
-            defaults.get("transfers_rest_days", []), key=lambda x: (x[0], x[1], x[2])
-        )
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(defaults, f, ensure_ascii=False, indent=4)
-        return defaults
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            user_config = json.load(f)
+        # Ключи, которых нет в файле, берутся из DEFAULT_CONFIG: новые версии программы
+        # подхватывают новые настройки без потери старых.
+        config = {**config, **user_config}
 
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    changed = False
-
-    # Миграция: добавляем ключи из DEFAULT_CONFIG, которых ещё нет в файле пользователя.
-    # Это позволяет новым версиям программы подхватывать новые настройки без потери старых.
-    for key, default_value in defaults.items():
-        if key not in config:
-            config[key] = copy.deepcopy(default_value)
-            changed = True
-
-    # Сортировка обычных праздников
-    if "holidays_by" in config:
-        sorted_holidays = sorted(config["holidays_by"], key=lambda x: (x[0], x[1]))
-        if config["holidays_by"] != sorted_holidays:
-            config["holidays_by"] = sorted_holidays
-            changed = True
-
-    # Сортировка рабочих переносов
-    if "transfers_work_days" in config:
-        sorted_tw = sorted(config["transfers_work_days"], key=lambda x: (x[0], x[1], x[2]))
-        if config["transfers_work_days"] != sorted_tw:
-            config["transfers_work_days"] = sorted_tw
-            changed = True
-
-    # Сортировка выходных переносов
-    if "transfers_rest_days" in config:
-        sorted_tr = sorted(config["transfers_rest_days"], key=lambda x: (x[0], x[1], x[2]))
-        if config["transfers_rest_days"] != sorted_tr:
-            config["transfers_rest_days"] = sorted_tr
-            changed = True
-
-    if changed:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=4)
-
+    config["holidays_by"] = sorted(config.get("holidays_by", []), key=holidays.sort_key)
+    for key in ("transfers_work_days", "transfers_rest_days"):
+        config[key] = sorted(config.get(key, []), key=lambda x: (x[0], x[1], x[2]))
     return config
 
-# Глобальные переменные настроек
+
+# Глобальный словарь настроек: общий для всех модулей, меняется только на месте.
 CONFIG = load_config()
-HOLIDAYS = set(tuple(x) for x in CONFIG.get("holidays_by", []))
+
+
+def get_config() -> dict:
+    """Текущие настройки (тот же словарь, что и core.utils.CONFIG)."""
+    return CONFIG
+
+
+def update_config(new: dict) -> None:
+    """Заменяет содержимое CONFIG на месте. Новый dict не создаётся: на CONFIG ссылаются
+    другие модули (utils, auto_schedule, excel_io), и подмена объекта разорвала бы связь.
+    Значения копируются, чтобы правки в окне не меняли рабочие настройки до применения."""
+    fresh = copy.deepcopy(new)
+    for key in [k for k in CONFIG if k not in fresh]:
+        del CONFIG[key]
+    CONFIG.update(fresh)
+
 
 def reload_config() -> None:
-    global CONFIG, HOLIDAYS
-    CONFIG = load_config()
-    HOLIDAYS = set(tuple(x) for x in CONFIG.get("holidays_by", []))
+    """Перечитывает файл и обновляет CONFIG на месте."""
+    update_config(load_config())
+
+
+def save_config(cfg: Optional[dict] = None) -> None:
+    """Записывает настройки (по умолчанию — CONFIG) в CONFIG_FILE.
+
+    Запись атомарная: данные сначала целиком сериализуются и пишутся во временный файл рядом,
+    затем он заменяет старый. Сбой на любом шаге оставляет прежний файл нетронутым.
+    Ошибка — ConfigSaveError с понятным текстом."""
+    data = CONFIG if cfg is None else cfg
+    target = CONFIG_FILE
+    tmp_path = None
+    try:
+        text = json.dumps(data, ensure_ascii=False, indent=4)
+        fd, tmp_path = tempfile.mkstemp(prefix=".cfg-", suffix=".tmp", dir=os.path.dirname(target) or ".")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, target)
+    except (OSError, TypeError, ValueError) as e:
+        raise ConfigSaveError(f"Не удалось сохранить настройки:\n{target}\n\n{e}") from e
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)

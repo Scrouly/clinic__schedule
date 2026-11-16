@@ -1,15 +1,17 @@
 """
 pages/holidays.py — страница «Праздничные дни».
 
-Редактирование списка holidays_by: [[месяц, день], ...].
+Редактирование списка holidays_by: [месяц, день] — каждый год,
+[год, месяц, день] — только в этом году (поле «Год» не заполнено — праздник каждый год).
 
 Публичные атрибуты:
-    hol_rows  — список dict{"frame", "m", "d"} для чтения в _save_config
+    hol_rows  — список dict{"frame", "m", "d", "y"} для чтения в _save_config
 """
 import calendar
-from datetime import date
 
 import customtkinter as ctk
+
+from core import holidays
 
 from ..themes import T, MONTHS
 from ..widgets import UIHelpersMixin
@@ -29,7 +31,9 @@ class HolidaysPage(ctk.CTkFrame, UIHelpersMixin):
     # ── Построение ────────────────────────────────────────────────────────────
 
     def _build(self):
-        self._page_title(self, "Праздничные дни", "Дни, которые будут помечены «П» и подсвечены в табеле")
+        self._page_title(self, "Праздничные дни",
+                         "Дни, которые будут помечены «П» и подсвечены в табеле. "
+                         "Год можно не указывать — тогда праздник повторяется каждый год")
 
         card = self._card(self)
         card.grid(row=2, column=0, sticky="nsew")
@@ -42,8 +46,11 @@ class HolidaysPage(ctk.CTkFrame, UIHelpersMixin):
         self._hol_scroll.pack(fill="both", expand=True, padx=8, pady=8)
 
         for item in self.app.cfg.get("holidays_by", []):
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                self.add_row(int(item[0]), int(item[1]))
+            try:
+                year, month, day = holidays.normalize_holiday(item)
+            except ValueError:
+                continue
+            self.add_row(month, day, year)
 
         self._ghost_btn(self, "＋  Добавить праздник", lambda: self.add_row(1, 1)).grid(
             row=3, column=0, sticky="w", pady=(8, 0)
@@ -51,7 +58,7 @@ class HolidaysPage(ctk.CTkFrame, UIHelpersMixin):
 
     # ── Управление строками ───────────────────────────────────────────────────
 
-    def add_row(self, m: int = 1, d: int = 1):
+    def add_row(self, m: int = 1, d: int = 1, year=None):
         rf = ctk.CTkFrame(self._hol_scroll, fg_color="transparent")
         rf.pack(fill="x", pady=2)
 
@@ -62,7 +69,9 @@ class HolidaysPage(ctk.CTkFrame, UIHelpersMixin):
         def _get_max_days(month_str: str) -> int:
             try:
                 mo = int(month_str.split()[0])
-                return calendar.monthrange(date.today().year, mo)[1]
+                # Без года — високосный: 29 февраля бывает не каждый год, но праздником быть может
+                y = int(yc.get()) if yc.get().strip() else 2024
+                return calendar.monthrange(y, mo)[1]
             except Exception:
                 return 31
 
@@ -72,13 +81,19 @@ class HolidaysPage(ctk.CTkFrame, UIHelpersMixin):
             if int(dc.get()) > max_d:
                 dc.set(f"{max_d:02d}")
 
+        yc = self._entry(rf, width=130, placeholder_text="каждый год")
+        if year is not None:
+            yc.insert(0, str(year))
+
         init_max = _get_max_days(mc.get())
         dc = self._combo(rf, [f"{i:02d}" for i in range(1, init_max + 1)], width=80)
         dc.set(f"{min(d, init_max):02d}")
         dc.pack(side="left", padx=(0, 6))
+        yc.pack(side="left", padx=(0, 6))
         mc.configure(command=_update_days)
+        yc.bind("<FocusOut>", _update_days)
 
-        rec = {"frame": rf, "m": mc, "d": dc}
+        rec = {"frame": rf, "m": mc, "d": dc, "y": yc}
         self._del_btn(rf, lambda r=rec: self._del_row(r)).pack(side="left")
         self.hol_rows.append(rec)
 

@@ -7,6 +7,7 @@ app.py — CityClinicApp.
   • запуск генерации в отдельном потоке
   • синхронизацию конфига с модулями парсера
 """
+import copy
 import json
 import logging
 import os
@@ -21,6 +22,8 @@ import customtkinter as ctk
 from PIL import Image
 
 from core import auto_schedule, cfgdiff, dental, norms, outfile
+from core import config as core_config
+from core import holidays as holiday_utils
 
 from . import themes as _themes_mod
 from .themes import T, THEMES
@@ -62,7 +65,7 @@ APP_DIR      = _get_app_dir()
 RESOURCE_DIR = _get_resource_dir()
 
 GUI_STATE_FILE = os.path.join(APP_DIR,      "gui_state.json")
-CONFIG_FILE    = os.path.join(APP_DIR,      "auto_schedule_config.json")
+CONFIG_FILE    = core_config.CONFIG_FILE      # один путь для GUI и core
 LOGO_PATH      = os.path.join(RESOURCE_DIR, "resources", "logo.png")
 
 
@@ -98,21 +101,9 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         self.minsize(920, 560)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # ── Загрузка конфига (с автосозданием при первом запуске)
-        from core.config import DEFAULT_CONFIG
-        if not os.path.exists(CONFIG_FILE):
-            self.cfg: dict = json.loads(json.dumps(DEFAULT_CONFIG))  # глубокая копия
-            try:
-                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(self.cfg, f, ensure_ascii=False, indent=4)
-            except Exception as _e:
-                gen_log.warning(f"§WARN§ Не удалось создать конфиг: {_e}")
-        else:
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    self.cfg = json.load(f)
-            except Exception:
-                self.cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        # ── Настройки: окно правит свою копию, в рабочие (core_config.CONFIG) и в файл они
+        # попадают при сохранении. Файл создаётся при первом сохранении, не при запуске.
+        self.cfg: dict = copy.deepcopy(core_config.get_config())
 
         # ── Тема из сохранённого состояния (gui_state.json создаётся при первом сохранении)
         self._active      = "generate"
@@ -459,15 +450,6 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         """Переносит значения со страниц настроек в self.cfg (на диск не пишет)."""
         np = self.norms_page
 
-        self.cfg["holidays_by"] = []
-        for r in self.holidays_page.hol_rows:
-            try:
-                self.cfg["holidays_by"].append(
-                    [int(r["m"].get().split()[0]), int(r["d"].get().strip())]
-                )
-            except Exception:
-                pass
-
         self.cfg["title_keywords"] = {}
         for r in self.keywords_page.kw_rows:
             k, v = r["k"].get().strip(), r["v"].get().strip()
@@ -483,6 +465,13 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
         self.cfg["transfers_work_days"] = self._parse_transfers(self.transfers_page.tw_rows)
         self.cfg["transfers_rest_days"] = self._parse_transfers(self.transfers_page.tr_rows)
+
+        # Последними: некорректный год праздника прерывает сбор исключением ValueError,
+        # а всё остальное к этому моменту уже перенесено.
+        self.cfg["holidays_by"] = holiday_utils.from_form_rows(
+            (int(r["m"].get().split()[0]), int(r["d"].get().strip()), r["y"].get())
+            for r in self.holidays_page.hol_rows
+        )
 
     def _snapshot_pages_into_cfg(self) -> None:
         """Запоминает несохранённые правки страниц в self.cfg перед пересборкой
@@ -508,16 +497,15 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             return
 
         # 2. Фиксируем данные из страниц в self.cfg
-        self._collect_page_settings(base_val, rules)
-
-        # 3. Запись на диск и синхронизация
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=4)
-            self._force_sync_config()
+            self._collect_page_settings(base_val, rules)
+        except ValueError as e:
+            messagebox.showerror("Ошибка в праздничных днях", str(e))
+            return
+
+        # 3. Запись на диск и применение
+        if self._force_sync_config():
             messagebox.showinfo("Сохранено", "✓  Настройки успешно сохранены.")
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{e}")
 
     # ── Синхронизация конфига с модулями парсера ──────────────────────────────
 
@@ -525,39 +513,18 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         """Немедленно сохраняет excel_colors и синхронизирует парсер."""
         self._force_sync_config()
 
-    def _force_sync_config(self) -> None:
-        """
-        Записывает self.cfg на диск и патчит объекты CONFIG/HOLIDAYS
-        во всех уже импортированных модулях парсера in-place.
-
-        Нельзя вызывать reload_config() — он создаёт новый dict,
-        разрывая общую ссылку между auto_schedule, excel_io и utils.
-        """
-        # 1. Диск
+    def _force_sync_config(self) -> bool:
+        """Применяет self.cfg к рабочим настройкам на месте (core_config.update_config:
+        новый dict создавать нельзя — на CONFIG ссылаются auto_schedule, excel_io и utils)
+        и записывает файл. False — файл записать не удалось (ошибка показана пользователю;
+        в текущем сеансе настройки при этом действуют)."""
+        core_config.update_config(self.cfg)
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=4)
-        except Exception:
-            pass
-
-        # 2. Патч CONFIG in-place
-        try:
-            if hasattr(auto_schedule, "CONFIG"):
-                cfg_obj = auto_schedule.CONFIG
-                for k, v in self.cfg.items():
-                    cfg_obj[k] = v
-                for k in list(cfg_obj.keys()):
-                    if k not in self.cfg:
-                        del cfg_obj[k]
-        except Exception:
-            pass
-
-        # 3. Явная замена utils.HOLIDAYS
-        try:
-            from core import utils as _utils_mod
-            _utils_mod.HOLIDAYS = set(tuple(x) for x in self.cfg.get("holidays_by", []))
-        except Exception:
-            pass
+            core_config.save_config()
+        except core_config.ConfigSaveError as e:
+            messagebox.showerror("Настройки не сохранены", str(e))
+            return False
+        return True
 
     # ── Выбор файлов (колбэки для GeneratePage) ───────────────────────────────
 
@@ -714,9 +681,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         """Разделы настроек, изменённые в окне, но не записанные в файл (все, а не только цвета)."""
         try:
             self._snapshot_pages_into_cfg()
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            return cfgdiff.unsaved_sections(self.cfg, saved)
+            return cfgdiff.unsaved_sections(self.cfg, core_config.load_config())
         except Exception as e:      # не удалось сравнить — не мешаем закрыть окно
             gen_log.warning(f"Не удалось проверить несохранённые настройки: {e}")
             return []
