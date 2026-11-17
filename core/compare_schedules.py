@@ -19,13 +19,6 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter
 
-try:
-    from xlcalculator import ModelCompiler, Evaluator as XLEvaluator
-
-    _XLCALC_AVAILABLE = True
-except ImportError:
-    _XLCALC_AVAILABLE = False
-
 from core.utils import is_doctor_name_row, yo_to_ye, parse_time_intervals, format_intervals
 from core.xlstyle import style_array, styles_for
 
@@ -256,8 +249,13 @@ def style_single_cell(ws, row, col, value, font, alignment, fill, border):
 
 
 def build_formula_evaluator(filepath: str):
-    """Строит вычислитель формул xlcalculator."""
-    if not _XLCALC_AVAILABLE:
+    """Строит вычислитель формул xlcalculator.
+
+    Библиотека тянет за собой pandas, numpy и scipy (около 0,3 с загрузки), поэтому
+    подключается только здесь, при первом реальном обращении, а не при запуске программы."""
+    try:
+        from xlcalculator import ModelCompiler, Evaluator as XLEvaluator
+    except ImportError:
         return None
     try:
         compiler = ModelCompiler()
