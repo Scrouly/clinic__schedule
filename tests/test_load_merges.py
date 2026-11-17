@@ -19,13 +19,14 @@ def _book(path):
 
 
 def test_merged_ranges_are_filled_across_all_cells(tmp_path):
-    df = load_excel_with_merges(_book(str(tmp_path / "m.xlsx")), "Лист")
-    assert [df.iloc[0, c] for c in range(3)] == ["Терапия"] * 3
-    assert [df.iloc[r, 0] for r in range(2, 5)] == ["Иванов"] * 3
-    assert df.iloc[1, 4] == "вне диапазонов"                 # чужие ячейки не затронуты
-    assert df.iloc[1, 0] != "Терапия"
+    grid = load_excel_with_merges(_book(str(tmp_path / "m.xlsx")), "Лист")
+    assert [grid[0][c] for c in range(3)] == ["Терапия"] * 3
+    assert [grid[r][0] for r in range(2, 5)] == ["Иванов"] * 3
+    assert grid[1][4] == "вне диапазонов"                    # чужие ячейки не затронуты
+    assert grid[1][0] != "Терапия"
 
 
-def test_result_keeps_object_dtype_and_shape(tmp_path):
-    df = load_excel_with_merges(_book(str(tmp_path / "m.xlsx")), "Лист")
-    assert all(str(t) == "object" for t in df.dtypes) and df.shape == (5, 5)
+def test_result_is_a_rectangular_grid_without_pandas(tmp_path):
+    grid = load_excel_with_merges(_book(str(tmp_path / "m.xlsx")), "Лист")
+    assert isinstance(grid, list) and all(isinstance(row, list) for row in grid)
+    assert len(grid) == 5 and {len(row) for row in grid} == {5}

@@ -1,6 +1,6 @@
 """
 excel_io.py — Чтение источника и запись в шаблон.
-Изолирует работу с pandas и openpyxl от бизнес-логики.
+Изолирует работу с openpyxl от бизнес-логики.
 100% СОВМЕСТИМОСТЬ С WPS OFFICE И MS EXCEL ЗА СЧЕТ ЗЕРКАЛЬНОЙ ЛОГИКИ СРАВНЕНИЯ.
 """
 
@@ -8,9 +8,8 @@ import calendar
 import logging
 import re
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
-import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
@@ -29,35 +28,71 @@ from .xlstyle import styles_for
 logger = logging.getLogger(__name__)
 
 
-def load_excel_with_merges(file_path: str, sheet_name: str) -> pd.DataFrame:
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, dtype=object)
+# Строки, которые pandas.read_excel считал «пустыми» (его список NA по умолчанию).
+# Сохранены, чтобы разбор источника вёл себя так же, как до отказа от pandas.
+_NA_STRINGS = frozenset({
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
+    "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
+})
+
+
+def _clean_cell(cell) -> Any:
+    """Значение ячейки для сетки: пусто и «NA-подобное» → None, целое число → int."""
+    value = cell.value
+    if value is None or cell.data_type == "e":
+        return None
+    if cell.data_type == "n":
+        as_int = int(value)
+        return as_int if as_int == value else float(value)
+    if isinstance(value, str) and value in _NA_STRINGS:
+        return None
+    return value
+
+
+def load_excel_with_merges(file_path: str, sheet_name: str) -> List[List[Any]]:
+    """Лист как прямоугольная сетка значений (список строк), объединённые ячейки заполнены.
+
+    Хвостовые пустые строки и столбцы отрезаются, ведущие остаются; пустые ячейки — None.
+    Ошибки (#N/A…) и «NA»-подобный текст тоже превращаются в None, но размер сетки задают."""
     wb = load_workbook(file_path, data_only=True)
-    ws = wb[sheet_name]
+    try:
+        ws = wb[sheet_name]
+        grid = []
+        for row in ws.iter_rows():
+            # Данными считаются ячейки до последней непустой; «NA»-текст и ошибки — данные,
+            # хотя в сетку попадают как None.
+            width = 0
+            for idx, cell in enumerate(row, 1):
+                if cell.value is not None and cell.value != "":
+                    width = idx
+            grid.append([_clean_cell(cell) for cell in row[:width]])
+        while grid and not grid[-1]:
+            grid.pop()
+        n_cols = max((len(row) for row in grid), default=0)
+        for row in grid:
+            row.extend([None] * (n_cols - len(row)))
+        n_rows = len(grid)
 
-    # Объединённые диапазоны заполняются в массиве numpy: присваивание df.iloc[...] = значение
-    # на каждый диапазон стоило на порядок дороже (сотни диапазонов на лист).
-    values = df.to_numpy(dtype=object, copy=True)
-    n_rows, n_cols = values.shape
-    for merged_cell in ws.merged_cells.ranges:
-        min_col, min_row, max_col, max_row = merged_cell.bounds
-        start_row, end_row = min_row - 1, max_row
-        start_col, end_col = min_col - 1, max_col
-
-        if start_row < n_rows and start_col < n_cols:
-            end_row = min(end_row, n_rows)
-            end_col = min(end_col, n_cols)
-            values[start_row:end_row, start_col:end_col] = values[start_row, start_col]
-
-    wb.close()
-    return pd.DataFrame(values, index=df.index, columns=df.columns, dtype=object)
+        for merged_cell in ws.merged_cells.ranges:
+            min_col, min_row, max_col, max_row = merged_cell.bounds
+            start_row, start_col = min_row - 1, min_col - 1
+            if start_row >= n_rows or start_col >= n_cols:
+                continue
+            end_row, end_col = min(max_row, n_rows), min(max_col, n_cols)
+            value = grid[start_row][start_col]
+            for r in range(start_row, end_row):
+                grid[r][start_col:end_col] = [value] * (end_col - start_col)
+    finally:
+        wb.close()
+    return grid
 
 
-def _detect_source_rows(df: pd.DataFrame) -> dict:
+def _detect_source_rows(grid: List[List[Any]]) -> dict:
     LABEL_KEYS = {'отделение': 'department', 'кабинет': 'cabinet', 'специалист': 'specialist', 'дата': 'header', }
     found = {}
-    for i in range(min(20, len(df))):
-        cell = df.iloc[i, 0]
-        if pd.isna(cell): continue
+    for i in range(min(20, len(grid))):
+        cell = grid[i][0]
+        if cell is None: continue
         label = str(cell).strip().lower()
         for key, role in LABEL_KEYS.items():
             if label == key:
@@ -66,19 +101,24 @@ def _detect_source_rows(df: pd.DataFrame) -> dict:
     return found
 
 
+def _text(value) -> str:
+    """Текст ячейки для разбора смен и часов; пустая ячейка — пустая строка."""
+    return "" if value is None else str(value)
+
+
 def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[DoctorRecord]:
     def _prog(v):
         if progress_cb: progress_cb(v)
 
     try:
         _prog(0.05)
-        df = load_excel_with_merges(source_file, month_sheet)
+        grid = load_excel_with_merges(source_file, month_sheet)
         _prog(0.20)
     except Exception as e:
         logger.error(f"Ошибка загрузки листа '{month_sheet}': {e}")
         raise
 
-    struct = _detect_source_rows(df)
+    struct = _detect_source_rows(grid)
     required = ['cabinet', 'specialist', 'header']
     missing = [k for k in required if k not in struct]
     if missing:
@@ -96,27 +136,30 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
     hdr_idx = struct['header']
     data_start_idx = hdr_idx + 1
 
-    department_row = df.iloc[dept_idx] if dept_idx is not None else pd.Series([pd.NA] * len(df.columns), dtype=object)
-    cabinet_row = df.iloc[cab_idx]
-    header_row = df.iloc[hdr_idx]
+    n_rows = len(grid)
+    n_cols = len(grid[0]) if grid else 0
+    department_row = grid[dept_idx] if dept_idx is not None else [None] * n_cols
+    cabinet_row = grid[cab_idx]
+    header_row = grid[hdr_idx]
 
-    name_row_raw = df.iloc[name_idx].replace(r'^\s*$', pd.NA, regex=True)
-    name_row = name_row_raw.copy()
-    for ci in range(3, len(name_row)):
-        if pd.isna(name_row_raw.iloc[ci]):
-            hdr_val = str(header_row.iloc[ci]).lower().strip() if pd.notna(header_row.iloc[ci]) else ''
+    # Ячейки из одних пробелов считаются пустыми.
+    name_row_raw = [None if isinstance(v, str) and re.search(r'^\s*$', v) else v for v in grid[name_idx]]
+    name_row = list(name_row_raw)
+    for ci in range(3, n_cols):
+        if name_row_raw[ci] is None:
+            hdr_val = str(header_row[ci]).lower().strip() if header_row[ci] is not None else ''
             if any(k in hdr_val for k in ['смен', 'опер', 'прием', 'приём', 'час']):
-                prev = name_row.iloc[ci - 1]
-                if pd.notna(prev):
-                    name_row.iloc[ci] = prev
+                prev = name_row[ci - 1]
+                if prev is not None:
+                    name_row[ci] = prev
 
     doctors_map = {}
     current_block_id = 0
     prev_raw_val = None
 
-    for ci in range(2, len(name_row)):
-        val = name_row.iloc[ci]
-        if pd.isna(val):
+    for ci in range(2, n_cols):
+        val = name_row[ci]
+        if val is None:
             prev_raw_val = None
             continue
 
@@ -138,16 +181,16 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
         hint_m = re.search(r'[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(.*)$', raw_str)
         spec_hint = hint_m.group(1).strip() if hint_m else ""
 
-        cabinet = str(cabinet_row.iloc[ci]).strip() if pd.notna(cabinet_row.iloc[ci]) and str(
-            cabinet_row.iloc[ci]).strip().lower() != 'кабинет' else ''
-        direction = str(department_row.iloc[ci]).strip() if pd.notna(department_row.iloc[ci]) and str(
-            department_row.iloc[ci]).strip().lower() not in ('отделение', 'направление') else ''
+        cabinet = str(cabinet_row[ci]).strip() if cabinet_row[ci] is not None and str(
+            cabinet_row[ci]).strip().lower() != 'кабинет' else ''
+        direction = str(department_row[ci]).strip() if department_row[ci] is not None and str(
+            department_row[ci]).strip().lower() not in ('отделение', 'направление') else ''
 
         doc_key = (direction, cabinet, name, spec_hint, current_block_id)
         if doc_key not in doctors_map:
             doctors_map[doc_key] = {'time_cols': [], 'hours_cols': []}
 
-        own_hdr = str(header_row.iloc[ci]).lower().strip() if pd.notna(header_row.iloc[ci]) else ''
+        own_hdr = str(header_row[ci]).lower().strip() if header_row[ci] is not None else ''
 
         if any(k in own_hdr for k in ['смен', 'опер', 'прием', 'приём']):
             doctors_map[doc_key]['time_cols'].append(ci)
@@ -163,7 +206,6 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
                      'гинекологическое': 'Гинекологическое', 'консультативное': 'Консультативное',
                      'диагностическое': 'Диагностическое', 'мибс': 'МИБС'}
 
-    cells = df.to_numpy(dtype=object)       # индексация массива вместо df.iloc[...] в циклах по дням
     records: List[DoctorRecord] = []
     for (direction, cabinet, name, spec_hint, block_id), cols in doctors_map.items():
         direction = DEPT_TYPO_MAP.get(direction.lower().strip(), direction)
@@ -174,21 +216,21 @@ def parse_source(source_file: str, month_sheet: str, progress_cb=None) -> List[D
         sched = {}
         for day in range(1, 32):
             ri = data_start_idx + (day - 1)
-            if ri >= len(df): break
+            if ri >= n_rows: break
 
             hours_val = 0.0
             for h_col in cols['hours_cols']:
-                if h_col < df.shape[1]:
+                if h_col < n_cols:
                     try:
-                        hours_str = str(cells[ri, h_col]).replace(',', '.').strip()
+                        hours_str = _text(grid[ri][h_col]).replace(',', '.').strip()
                         hours_val += float(hours_str) if hours_str and hours_str.lower() != 'nan' else 0.0
                     except ValueError:
                         pass
 
             daily_times = []
             for t_col in cols['time_cols']:
-                if t_col < df.shape[1]:
-                    t_str = str(cells[ri, t_col]).strip()
+                if t_col < n_cols:
+                    t_str = _text(grid[ri][t_col]).strip()
                     if t_str and t_str.lower() not in ['nan', '0', '-', '']:
                         daily_times.append(t_str)
 
