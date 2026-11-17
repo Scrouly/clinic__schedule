@@ -6,8 +6,9 @@ pages/transfers.py — страница «Переносы дней» (чип-с
   • Выходные дни, перенесённые с рабочих  (transfers_rest_days)
 
 Публичные атрибуты:
-    tw_rows  — список кортежей (_FakeCombo, _FakeCombo, _FakeCombo) для рабочих переносов
+    tw_rows  — список кортежей (год, месяц, день) рабочих переносов
     tr_rows  — аналогично для выходных переносов
+Из них настройки собирает core.holidays.transfers_from_rows.
 """
 from datetime import date
 
@@ -22,20 +23,14 @@ MONTH_GEN   = ["января", "февраля", "марта", "апреля", "
                "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
 
-class _FakeCombo:
-    """Заглушка ComboBox для совместимости с parse_transfers в app._save_config."""
-    def __init__(self, val): self._v = str(val)
-    def get(self): return self._v
-
-
 class TransfersPage(ctk.CTkFrame, UIHelpersMixin):
     """Страница настройки переносов рабочих/выходных дней."""
 
     def __init__(self, parent, app):
         ctk.CTkFrame.__init__(self, parent, fg_color="transparent")
         self.app = app
-        self.tw_rows: list[tuple] = []   # рабочие переносы
-        self.tr_rows: list[tuple] = []   # выходные переносы
+        self.tw_rows: list[tuple[int, int, int]] = []   # рабочие переносы
+        self.tr_rows: list[tuple[int, int, int]] = []   # выходные переносы
         self.grid_columnconfigure((0, 1), weight=1)
         self.grid_rowconfigure(2, weight=1)
         self._build()
@@ -158,16 +153,12 @@ class TransfersPage(ctk.CTkFrame, UIHelpersMixin):
         )
         del_btn.grid(row=0, column=1, padx=(8, 0))
 
-        widgets_tuple = (
-            _FakeCombo(f"{d_val:02d}"),
-            _FakeCombo(MONTH_SHORT[m_val - 1]),
-            _FakeCombo(str(y_val)),
-        )
-        target_list.append(widgets_tuple)
+        entry = (y_val, m_val, d_val)
+        target_list.append(entry)
 
         def _delete():
-            if widgets_tuple in target_list:
-                target_list.remove(widgets_tuple)
+            if entry in target_list:
+                target_list.remove(entry)
             chip.destroy()
 
         del_btn.configure(command=_delete)

@@ -7,13 +7,14 @@ excel_io.py — Чтение источника и запись в шаблон.
 import calendar
 import logging
 import re
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
-from openpyxl.formatting.rule import CellIsRule
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from pydantic import ValidationError
@@ -22,7 +23,7 @@ from . import norms
 from .config import CONFIG
 from .models import DoctorRecord, Shift
 from .utils import (combine_times, calculate_total_hours, normalize_time_legacy, yo_to_ye, calculate_monthly_norm,
-                    is_holiday, normalize_name)
+                    is_holiday, normalize_name, parse_time_intervals)
 from .xlstyle import styles_for
 
 logger = logging.getLogger(__name__)
@@ -340,10 +341,110 @@ def _paint_day_header(ws, day_row_num: int, days_in_month: int, get_col, year_nu
 
 # ─── ИЗМЕНЕНИЕ В excel_io.py ───────────────────────────────────────────────
 
-def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get_col, year_num: int, month_num: int,
-                      transfers_work: list, transfers_rest: list, pink_fill, gray_fill, clear_fill, mismatch_fill,
-                      light_gray_fill, fit_alignment, norm_col: int, hours_total_col: int, base_norm: float,
-                      uzd_norm: float, highlight_enabled: bool, red_fill, green_fill) -> None:
+@dataclass(frozen=True)
+class FillContext:
+    """Всё, что одинаково для каждого врача книги: календарь, нормы и заливки."""
+    year: int
+    month: int
+    days_in_month: int
+    transfers_work: list
+    transfers_rest: list
+    base_norm: float
+    uzd_norm: float
+    highlight_enabled: bool
+    pink_fill: PatternFill
+    gray_fill: PatternFill
+    clear_fill: PatternFill
+    mismatch_fill: PatternFill
+    light_gray_fill: PatternFill
+    red_fill: PatternFill
+    green_fill: PatternFill
+    fit_alignment: Alignment
+
+
+@dataclass(frozen=True)
+class SheetLayout:
+    """Раскладка одного листа: где какой день и столбцы итогов."""
+    get_col: Callable[[int], Optional[int]]
+    norm_col: int
+    hours_total_col: Optional[int]
+
+
+_NIGHT_RANGES = (
+    (0, 360),       # 00:00 - 06:00
+    (1320, 1440),   # 22:00 - 24:00
+    (1440, 1800),   # 24:00 - 30:00 (для переходящих смен)
+)
+
+
+def _night_hours(time_str: str):
+    """Ночные часы (22:00–06:00) в строке времени смены: int, float или None, если их нет."""
+    total_night_minutes = 0
+    for start, end in parse_time_intervals(str(time_str)):
+        for n_start, n_end in _NIGHT_RANGES:
+            overlap_start = max(start, n_start)
+            overlap_end = min(end, n_end)
+            if overlap_start < overlap_end:
+                total_night_minutes += (overlap_end - overlap_start)
+    if total_night_minutes <= 0:
+        return None
+    night_hours = total_night_minutes / 60.0
+    return int(night_hours) if night_hours.is_integer() else night_hours
+
+
+def _add_norm_vs_hours_rules(ws, ctx: FillContext, layout: SheetLayout, data_r: int, norm_col: int) -> None:
+    """Подсветка ячейки нормы: красная, если норма < часов, зелёная, если норма > часов."""
+    norm_col_letter = get_column_letter(norm_col)
+    h_col_letter = get_column_letter(layout.hours_total_col) if layout.hours_total_col else None
+    if not (norm_col_letter and h_col_letter):
+        return
+    norm_range = f"{norm_col_letter}{data_r}:{norm_col_letter}{data_r}"
+
+    # Знак "=" НЕ нужен в формулах CellIsRule для WPS! Только ссылка на ячейку
+    rule_over = CellIsRule(operator='lessThan', formula=[f'${h_col_letter}${data_r}'], fill=ctx.red_fill)
+    rule_under = CellIsRule(operator='greaterThan', formula=[f'${h_col_letter}${data_r}'], fill=ctx.green_fill)
+
+    ws.conditional_formatting.add(norm_range, rule_over)
+    ws.conditional_formatting.add(norm_range, rule_under)
+
+
+def _add_daily_hours_rule(ws, ctx: FillContext, title: str, data_r: int, time_r: int) -> None:
+    """Оранжевая подсветка часов по дневной норме специальности.
+
+    Не зависит от highlight_enabled — работает всегда, если для должности задана дневная норма
+    и распознана ставка.
+
+    Ставка 1,0  → подсвечиваем НЕДОРАБОТКУ: часы < норма (как раньше).
+    Ставка 0,25 / 0,5 / 0,75 → логика другая: используем ту же норму (как для 1,0),
+    но подсвечиваем ПЕРЕРАБОТКУ — случай, когда врач на неполной ставке фактически
+    отработал почти как на полной. Порог — (норма - 0.1), подсветка при hours > порог."""
+    daily_norm = get_daily_hours_norm(title)
+    rate = get_rate_from_title(title)
+    if not (daily_norm and rate and data_r and time_r):
+        return
+
+    hours_col_start = 3
+    hours_col_end = min(33, hours_col_start + ctx.days_in_month - 1)
+    hours_range_start = get_column_letter(hours_col_start)
+    hours_range_end = get_column_letter(hours_col_end)
+
+    # Целевой диапазон заливки — строка времени (time_r)
+    time_range = f"{hours_range_start}{time_r}:{hours_range_end}{time_r}"
+
+    orange_hex = "FFA500"
+    orange_fill = PatternFill(start_color=orange_hex, end_color=orange_hex, fill_type="solid")
+
+    # ISNUMBER отсекает текст (В, П, О, Б) и предотвращает ошибки при парсинге пустых ячеек.
+    if rate == '1.0':
+        formula = f'AND(ISNUMBER({hours_range_start}${data_r}), {hours_range_start}${data_r}<{daily_norm})'
+    else:
+        threshold = round(daily_norm - 0.1, 2)
+        formula = f'AND(ISNUMBER({hours_range_start}${data_r}), {hours_range_start}${data_r}>{threshold})'
+
+    ws.conditional_formatting.add(time_range, FormulaRule(formula=[formula], fill=orange_fill))
+
+
+def _fill_doctor_role(ws, role: dict, has_records: bool, ctx: FillContext, layout: SheetLayout) -> None:
     """Записывает расписание одного врача, включая ночные часы, и накладывает стили."""
     styles = styles_for(ws.parent)       # индексы стилей книги считаются один раз (см. core/xlstyle.py)
     sched = role['assigned_schedule']
@@ -352,12 +453,13 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
     night_r = role.get('night_r')  # Извлекаем строку ночных часов для МИБС
     title = role.get('title', '')
     norm_name = role.get('norm_name', '')
+    get_col = layout.get_col
 
     total_hours = 0.0
     has_time_written = False
     row_has_multiple_shifts = False
 
-    for day in range(1, days_in_month + 1):
+    for day in range(1, ctx.days_in_month + 1):
         col = get_col(day)
         if col is None:
             continue
@@ -366,14 +468,14 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
         tc = ws.cell(row=time_r, column=col)
         nc = ws.cell(row=night_r, column=col) if night_r else None
 
-        is_hol, is_weekend = _day_type(year_num, month_num, day, transfers_work, transfers_rest)
+        is_hol, is_weekend = _day_type(ctx.year, ctx.month, day, ctx.transfers_work, ctx.transfers_rest)
 
-        current_fill = pink_fill if is_hol else (gray_fill if is_weekend else clear_fill)
-        styles.apply(dc, fill=current_fill, alignment=fit_alignment)
-        styles.apply(tc, fill=current_fill, alignment=fit_alignment)
+        current_fill = ctx.pink_fill if is_hol else (ctx.gray_fill if is_weekend else ctx.clear_fill)
+        styles.apply(dc, fill=current_fill, alignment=ctx.fit_alignment)
+        styles.apply(tc, fill=current_fill, alignment=ctx.fit_alignment)
 
         if nc:
-            styles.apply(nc, fill=current_fill, alignment=fit_alignment)
+            styles.apply(nc, fill=current_fill, alignment=ctx.fit_alignment)
 
         if has_records:
             add = sched.get(day, Shift())
@@ -391,35 +493,13 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
                         row_has_multiple_shifts = True
 
                 # ─── АВТОМАТИЧЕСКИЙ ПОДЧЕТ НОЧНЫХ ЧАСОВ (22:00 - 06:00) ───
-                if nc and time_str:
-                    from .utils import parse_time_intervals
-                    intervals = parse_time_intervals(str(time_str))
-                    total_night_minutes = 0
-
-                    night_ranges = [(0, 360),  # 00:00 - 06:00
-                        (1320, 1440),  # 22:00 - 24:00
-                        (1440, 1800)  # 24:00 - 30:00 (для переходящих смен)
-                    ]
-
-                    for start, end in intervals:
-                        for n_start, n_end in night_ranges:
-                            overlap_start = max(start, n_start)
-                            overlap_end = min(end, n_end)
-                            if overlap_start < overlap_end:
-                                total_night_minutes += (overlap_end - overlap_start)
-
-                    if total_night_minutes > 0:
-                        night_hours = total_night_minutes / 60.0
-                        nc.value = int(night_hours) if night_hours.is_integer() else night_hours
-                    else:
-                        nc.value = None
-                elif nc:
-                    nc.value = None
+                if nc:
+                    nc.value = _night_hours(time_str) if time_str else None
 
                 if time_str:
                     calc_h = calculate_total_hours(str(time_str))
                     if abs(calc_h - add.hours) > 0.04:
-                        styles.apply(dc, fill=mismatch_fill)
+                        styles.apply(dc, fill=ctx.mismatch_fill)
                         diff = round(calc_h - add.hours, 2)
                         logger.warning(f"§WARN§ Расхождение ч/время — {norm_name}, "
                                        f"день {day:02d}: в графике {add.hours} ч., "
@@ -446,68 +526,21 @@ def _fill_doctor_role(ws, role: dict, has_records: bool, days_in_month: int, get
         else:
             ws.row_dimensions[time_r].height = 22.5
 
-    # light_gray_fill — тот же светло-серый (FFD9D9D9, solid), что раньше создавался здесь заново
-    # на каждого врача.
-    for day in range(days_in_month + 1, 32):
+    # Дни за концом месяца — светло-серые и пустые
+    for day in range(ctx.days_in_month + 1, 32):
         col = get_col(day)
         if col:
             for row in ((data_r, time_r, night_r) if night_r else (data_r, time_r)):
                 cell = ws.cell(row=row, column=col)
-                styles.apply(cell, fill=light_gray_fill)
+                styles.apply(cell, fill=ctx.light_gray_fill)
                 cell.value = None
 
-    calculated_norm = calculate_monthly_norm(title, base_norm, uzd_norm, year_num, month_num)
-    cell_norm = ws.cell(row=data_r, column=norm_col)
-    cell_norm.value = calculated_norm
+    calculated_norm = calculate_monthly_norm(title, ctx.base_norm, ctx.uzd_norm, ctx.year, ctx.month)
+    ws.cell(row=data_r, column=layout.norm_col).value = calculated_norm
 
-    # ─── ИСПРАВЛЕННЫЙ БЛОК УСЛОВНОГО ФОРМАТИРОВАНИЯ (ДОБАВЛЕН ЗНАК "=") ───
-    if highlight_enabled:
-        norm_col_letter = get_column_letter(norm_col)
-        h_col_letter = get_column_letter(hours_total_col) if hours_total_col else None
-
-        if norm_col_letter and h_col_letter:
-            norm_range = f"{norm_col_letter}{data_r}:{norm_col_letter}{data_r}"
-
-            # Знак "=" НЕ нужен в формулах CellIsRule для WPS! Только ссылка на ячейку
-            rule_over = CellIsRule(operator='lessThan', formula=[f'${h_col_letter}${data_r}'], fill=red_fill)
-            rule_under = CellIsRule(operator='greaterThan', formula=[f'${h_col_letter}${data_r}'], fill=green_fill)
-
-            ws.conditional_formatting.add(norm_range, rule_over)
-            ws.conditional_formatting.add(norm_range, rule_under)
-
-    # ─── УСЛОВНОЕ ФОРМАТИРОВАНИЕ ДЛЯ ЧАСОВ (ОРАНЖЕВОЕ) ───
-    # Не зависит от highlight_enabled — работает всегда, если для должности задана дневная норма
-    # и распознана ставка.
-    #
-    # Ставка 1,0  → подсвечиваем НЕДОРАБОТКУ: часы < норма (как раньше).
-    # Ставка 0,25 / 0,5 / 0,75 → логика другая: используем ту же норму (как для 1,0),
-    # но подсвечиваем ПЕРЕРАБОТКУ — случай, когда врач на неполной ставке фактически
-    # отработал почти как на полной. Порог — (норма - 0.1), подсветка при hours > порог.
-    daily_norm = get_daily_hours_norm(title)
-    rate = get_rate_from_title(title)
-    if daily_norm and rate and data_r and time_r:
-        from openpyxl.formatting.rule import FormulaRule
-
-        hours_col_start = 3
-        hours_col_end = min(33, hours_col_start + days_in_month - 1)
-        hours_range_start = get_column_letter(hours_col_start)
-        hours_range_end = get_column_letter(hours_col_end)
-
-        # Целевой диапазон заливки — строка времени (time_r)
-        time_range = f"{hours_range_start}{time_r}:{hours_range_end}{time_r}"
-
-        orange_hex = "FFA500"
-        orange_fill = PatternFill(start_color=orange_hex, end_color=orange_hex, fill_type="solid")
-
-        # ISNUMBER отсекает текст (В, П, О, Б) и предотвращает ошибки при парсинге пустых ячеек.
-        if rate == '1.0':
-            formula = f'AND(ISNUMBER({hours_range_start}${data_r}), {hours_range_start}${data_r}<{daily_norm})'
-        else:
-            threshold = round(daily_norm - 0.1, 2)
-            formula = f'AND(ISNUMBER({hours_range_start}${data_r}), {hours_range_start}${data_r}>{threshold})'
-
-        rule_hours_low = FormulaRule(formula=[formula], fill=orange_fill)
-        ws.conditional_formatting.add(time_range, rule_hours_low)
+    if ctx.highlight_enabled:
+        _add_norm_vs_hours_rules(ws, ctx, layout, data_r, layout.norm_col)
+    _add_daily_hours_rule(ws, ctx, title, data_r, time_r)
 
 
 # ── Оркестратор ───────────────────────────────────────────────────────────────
@@ -520,20 +553,25 @@ def write_sheet_data(wb, sheets, sheet_configs, template_docs, doctor_found_map,
         _update_sheet_headers(wb, month_str)
 
     hours_ctrl = CONFIG.get("hours_control", {})
-    highlight_enabled = hours_ctrl.get("highlight_diff", True)
-    base_norm = hours_ctrl.get("base_norm", 38.5)
-    uzd_norm = hours_ctrl.get("uzd_norm", 35.0)
+    colors = CONFIG.get("excel_colors", {})
 
-    red_hex = CONFIG.get("excel_colors", {}).get("overwork_red", "FFC7CE").replace("#", "")
-    green_hex = CONFIG.get("excel_colors", {}).get("underwork_green", "C6EFCE").replace("#", "")
-    red_fill = PatternFill(start_color=red_hex, end_color=red_hex, fill_type="solid")
-    green_fill = PatternFill(start_color=green_hex, end_color=green_hex, fill_type="solid")
-    mismatch_fill = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
-    light_gray_fill = PatternFill(start_color="FFD9D9D9", end_color="FFD9D9D9", fill_type="solid")
+    def solid(hex_color: str) -> PatternFill:
+        return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
 
-    transfers_work = CONFIG.get("transfers_work_days", [])
-    transfers_rest = CONFIG.get("transfers_rest_days", [])
-    fit_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ctx = FillContext(
+        year=year_num, month=month_num, days_in_month=days_in_month,
+        transfers_work=CONFIG.get("transfers_work_days", []),
+        transfers_rest=CONFIG.get("transfers_rest_days", []),
+        base_norm=hours_ctrl.get("base_norm", 38.5),
+        uzd_norm=hours_ctrl.get("uzd_norm", 35.0),
+        highlight_enabled=hours_ctrl.get("highlight_diff", True),
+        pink_fill=pink_fill, gray_fill=gray_fill, clear_fill=clear_fill,
+        mismatch_fill=solid("FFFF0000"),
+        light_gray_fill=solid("FFD9D9D9"),
+        red_fill=solid(colors.get("overwork_red", "FFC7CE").replace("#", "")),
+        green_fill=solid(colors.get("underwork_green", "C6EFCE").replace("#", "")),
+        fit_alignment=Alignment(horizontal='center', vertical='center', wrap_text=True),
+    )
 
     for sheet_name in sheets:
         ws = wb[sheet_name]
@@ -558,8 +596,10 @@ def write_sheet_data(wb, sheets, sheet_configs, template_docs, doctor_found_map,
         # Находим hours_total_col точно так же, как в рабочем файле сравнения
         hours_total_col = _find_hours_total_col(ws, day_row_num)
 
-        _paint_day_header(ws, day_row_num, days_in_month, get_col, year_num, month_num, transfers_work, transfers_rest,
-                          pink_fill, gray_fill, )
+        layout = SheetLayout(get_col=get_col, norm_col=norm_col, hours_total_col=hours_total_col)
+
+        _paint_day_header(ws, day_row_num, days_in_month, get_col, year_num, month_num, ctx.transfers_work,
+                          ctx.transfers_rest, pink_fill, gray_fill)
 
         for norm_name, roles in template_docs.items():
             has_records = doctor_found_map.get(norm_name, False)
@@ -567,7 +607,4 @@ def write_sheet_data(wb, sheets, sheet_configs, template_docs, doctor_found_map,
                 if role['sheet'] != sheet_name:
                     continue
                 role['norm_name'] = norm_name
-                _fill_doctor_role(ws, role, has_records, days_in_month, get_col, year_num, month_num, transfers_work,
-                                  transfers_rest, pink_fill, gray_fill, clear_fill, mismatch_fill, light_gray_fill,
-                                  fit_alignment, norm_col, hours_total_col, base_norm, uzd_norm, highlight_enabled,
-                                  red_fill, green_fill)
+                _fill_doctor_role(ws, role, has_records, ctx, layout)

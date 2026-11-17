@@ -6,16 +6,16 @@ Mixin-класс с фабричными методами для создани�
 
 Все методы используют T() из themes.py для получения актуального цвета темы.
 """
+from tkinter import colorchooser
+
 import customtkinter as ctk
+
+from .colorcfg import normalize_color
 from .themes import T
 
 
 class UIHelpersMixin:
     """Набор фабрик виджетов. Ожидает, что у self есть корень CTk/CTkFrame."""
-
-    # ── no-op для обратной совместимости (CTK кэширует цвета внутри)
-    def _tw(self, widget, **_):
-        return widget
 
     # ── Контейнеры ────────────────────────────────────────────────────────────
 
@@ -155,3 +155,50 @@ class UIHelpersMixin:
             row=row, column=2, padx=(0, 10), pady=6
         )
         return e
+
+    # ── Выбор цвета ───────────────────────────────────────────────────────────
+
+    def _build_color_row(self, parent, title: str, subtitle: str, init_color: str, on_pick):
+        """Строка «название — образец цвета — Изменить». После выбора цвета в диалоге
+        обновляет образец и вызывает ``on_pick(цвет_в_виде_#RRGGBB)``: что делать с цветом
+        (записать в настройки, обновить предпросмотр), решает страница."""
+        init_color = normalize_color(init_color)
+
+        row_f = ctk.CTkFrame(parent, fg_color="transparent")
+        row_f.pack(fill="x", padx=12, pady=8)
+
+        info = ctk.CTkFrame(row_f, fg_color="transparent")
+        info.pack(side="left")
+        ctk.CTkLabel(info, text=title, font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=T("TEXT_PRI")).pack(anchor="w")
+        ctk.CTkLabel(info, text=subtitle, font=ctk.CTkFont(size=12),
+                     text_color=T("TEXT_DIM")).pack(anchor="w")
+
+        chip_holder = ctk.CTkFrame(row_f, fg_color="transparent")
+        chip_holder.pack(side="right")
+
+        color_display = ctk.CTkFrame(
+            chip_holder, width=32, height=32,
+            fg_color=init_color, corner_radius=7,
+            border_width=1, border_color=T("BORDER"),
+        )
+        color_display.pack(side="left")
+        color_display.pack_propagate(False)
+
+        color_label = ctk.CTkLabel(
+            chip_holder, text=init_color.upper(),
+            font=ctk.CTkFont(family="Consolas", size=13),
+            text_color=T("TEXT_SEC"),
+        )
+        color_label.pack(side="left", padx=(8, 0))
+
+        def _pick():
+            result = colorchooser.askcolor(title="Выберите цвет",
+                                           initialcolor=color_label.cget("text"))[1]
+            if result:
+                color = result.upper()
+                color_display.configure(fg_color=color)
+                color_label.configure(text=color)
+                on_pick(color)
+
+        self._ghost_btn(chip_holder, "Изменить", _pick, width=80).pack(side="left", padx=(8, 0))

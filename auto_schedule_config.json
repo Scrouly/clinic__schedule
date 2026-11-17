@@ -52,6 +52,25 @@
             25
         ]
     ],
+    "transfers_work_days": [
+        [
+            2026,
+            4,
+            25
+        ]
+    ],
+    "transfers_rest_days": [
+        [
+            2026,
+            4,
+            20
+        ]
+    ],
+    "scoring": {
+        "min_accept_score": -0.8,
+        "dubious_threshold": 1.5,
+        "fuzzy_name_threshold": 0.95
+    },
     "special_codes": {
         "вых": "В",
         "командировка": "К",
@@ -169,24 +188,5 @@
             "рефлексотерапевт",
             "рефлексотерапи"
         ]
-    },
-    "transfers_work_days": [
-        [
-            2026,
-            4,
-            25
-        ]
-    ],
-    "transfers_rest_days": [
-        [
-            2026,
-            4,
-            20
-        ]
-    ],
-    "scoring": {
-        "min_accept_score": -0.8,
-        "dubious_threshold": 1.5,
-        "fuzzy_name_threshold": 0.95
     }
 }

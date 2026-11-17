@@ -428,24 +428,6 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
 
     # ── Сохранение конфига ────────────────────────────────────────────────────
 
-    _MONTH_SHORT_MAP = {
-        "Янв": 1, "Фев": 2, "Мар": 3, "Апр": 4, "Май": 5, "Июн": 6,
-        "Июл": 7, "Авг": 8, "Сен": 9, "Окт": 10, "Ноя": 11, "Дек": 12,
-    }
-
-    def _parse_transfers(self, widgets_list: list) -> list:
-        res = []
-        for day_cb, month_cb, year_cb in widgets_list:
-            try:
-                d     = int(day_cb.get())
-                m_raw = month_cb.get()
-                m = self._MONTH_SHORT_MAP[m_raw] if m_raw in self._MONTH_SHORT_MAP else int(m_raw.split()[0])
-                y = int(year_cb.get())
-                res.append([y, m, d])
-            except (ValueError, IndexError):
-                pass
-        return sorted(res, key=lambda x: (x[0], x[1], x[2]))
-
     def _collect_page_settings(self, base_val: float, rules: list) -> None:
         """Переносит значения со страниц настроек в self.cfg (на диск не пишет)."""
         np = self.norms_page
@@ -463,8 +445,8 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         }
         self.cfg["norms_by_specialty"] = rules
 
-        self.cfg["transfers_work_days"] = self._parse_transfers(self.transfers_page.tw_rows)
-        self.cfg["transfers_rest_days"] = self._parse_transfers(self.transfers_page.tr_rows)
+        self.cfg["transfers_work_days"] = holiday_utils.transfers_from_rows(self.transfers_page.tw_rows)
+        self.cfg["transfers_rest_days"] = holiday_utils.transfers_from_rows(self.transfers_page.tr_rows)
 
         # Последними: некорректный год праздника прерывает сбор исключением ValueError,
         # а всё остальное к этому моменту уже перенесено.

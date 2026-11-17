@@ -4,10 +4,9 @@ pages/colors.py — страница «Цвета Excel».
 Позволяет настроить цвет ячеек для праздников и выходных дней.
 Все изменения немедленно сохраняются через app._persist_excel_colors().
 """
-from tkinter import colorchooser
-
 import customtkinter as ctk
 
+from ..colorcfg import set_excel_color
 from ..themes import T
 from ..widgets import UIHelpersMixin
 
@@ -32,12 +31,12 @@ class ColorsPage(ctk.CTkFrame, UIHelpersMixin):
         colors = self.app.cfg.get("excel_colors", {})
         self._build_color_row(
             card, "🎉  Праздники", "Цвет ячеек в праздничные дни",
-            colors.get("holiday", "#FFB6C1"), "holiday",
+            colors.get("holiday", "#FFB6C1"), lambda c: self._on_color_picked("holiday", c),
         )
         ctk.CTkFrame(card, height=1, fg_color=T("BORDER")).pack(fill="x", padx=12, pady=0)
         self._build_color_row(
             card, "🌙  Выходные", "Цвет ячеек в субботу и воскресенье",
-            colors.get("weekend", "#F2F2F2"), "weekend",
+            colors.get("weekend", "#F2F2F2"), lambda c: self._on_color_picked("weekend", c),
         )
 
         # Предпросмотр
@@ -54,66 +53,12 @@ class ColorsPage(ctk.CTkFrame, UIHelpersMixin):
         self._preview_frame.pack(anchor="w")
         self._rebuild_preview()
 
-    def _build_color_row(self, parent, title: str, subtitle: str, init_color: str, key: str):
-        # Нормализуем цвет
-        if init_color and not init_color.startswith("#"):
-            init_color = "#" + init_color
-
-        row_f = ctk.CTkFrame(parent, fg_color="transparent")
-        row_f.pack(fill="x", padx=12, pady=8)
-
-        info = ctk.CTkFrame(row_f, fg_color="transparent")
-        info.pack(side="left")
-        ctk.CTkLabel(info, text=title, font=ctk.CTkFont(size=14, weight="bold"), text_color=T("TEXT_PRI")).pack(anchor="w")
-        ctk.CTkLabel(info, text=subtitle, font=ctk.CTkFont(size=12), text_color=T("TEXT_DIM")).pack(anchor="w")
-
-        chip_holder = ctk.CTkFrame(row_f, fg_color="transparent")
-        chip_holder.pack(side="right")
-
-        color_display = ctk.CTkFrame(
-            chip_holder, width=32, height=32,
-            fg_color=init_color, corner_radius=7,
-            border_width=1, border_color=T("BORDER"),
-        )
-        color_display.pack(side="left")
-        color_display.pack_propagate(False)
-
-        color_label = ctk.CTkLabel(
-            chip_holder,
-            text=init_color.upper(),
-            font=ctk.CTkFont(family="Consolas", size=13),
-            text_color=T("TEXT_SEC"),
-        )
-        color_label.pack(side="left", padx=(8, 0))
-
-        self._ghost_btn(
-            chip_holder, "Изменить",
-            lambda k=key, d=color_display, lb=color_label: self._pick_color(k, d, lb),
-            width=80,
-        ).pack(side="left", padx=(8, 0))
-
-        # Сохраняем ссылки для возможной синхронизации
-        if key == "holiday":
-            self._chip_hol_frame = color_display
-            self._chip_hol_label = color_label
-        else:
-            self._chip_week_frame = color_display
-            self._chip_week_label = color_label
-
     # ── Действия ──────────────────────────────────────────────────────────────
 
-    def _pick_color(self, key: str, display_frame, label_widget):
-        current = label_widget.cget("text")
-        result = colorchooser.askcolor(title="Выберите цвет", initialcolor=current)[1]
-        if result:
-            c = result.upper()
-            display_frame.configure(fg_color=c)
-            label_widget.configure(text=c)
-            if "excel_colors" not in self.app.cfg:
-                self.app.cfg["excel_colors"] = {}
-            self.app.cfg["excel_colors"][key] = c
-            self._rebuild_preview()
-            self.app._persist_excel_colors()
+    def _on_color_picked(self, key: str, color: str):
+        set_excel_color(self.app.cfg, key, color)
+        self._rebuild_preview()
+        self.app._persist_excel_colors()
 
     def _rebuild_preview(self):
         for w in self._preview_frame.winfo_children():

@@ -12,6 +12,7 @@ pages/norms.py — страница «Нормы часов».
 import customtkinter as ctk
 
 from core import norms
+from ..colorcfg import set_excel_color
 from ..themes import T
 from ..widgets import UIHelpersMixin
 
@@ -138,13 +139,13 @@ class NormsPage(ctk.CTkFrame, UIHelpersMixin):
         self._build_color_row(
             color_card,
             "🔴  Переработка", "Цвет ячейки, если отработано больше нормы",
-            colors.get("overwork_red", "#FFC7CE"), "overwork_red",
+            colors.get("overwork_red", "#FFC7CE"), lambda c: self._on_color_picked("overwork_red", c),
         )
         ctk.CTkFrame(color_card, height=1, fg_color=T("BORDER")).pack(fill="x", padx=12, pady=0)
         self._build_color_row(
             color_card,
             "🟢  Недоработка", "Цвет ячейки, если отработано меньше нормы",
-            colors.get("underwork_green", "#C6EFCE"), "underwork_green",
+            colors.get("underwork_green", "#C6EFCE"), lambda c: self._on_color_picked("underwork_green", c),
         )
 
     # ── Таблица специальностей ────────────────────────────────────────────────
@@ -181,49 +182,6 @@ class NormsPage(ctk.CTkFrame, UIHelpersMixin):
 
     # ── Цвета ─────────────────────────────────────────────────────────────────
 
-    def _build_color_row(self, parent, title: str, subtitle: str, init_color: str, key: str):
-        from tkinter import colorchooser
-
-        if init_color and not init_color.startswith("#"):
-            init_color = "#" + init_color
-
-        row_f = ctk.CTkFrame(parent, fg_color="transparent")
-        row_f.pack(fill="x", padx=12, pady=8)
-
-        info = ctk.CTkFrame(row_f, fg_color="transparent")
-        info.pack(side="left")
-        ctk.CTkLabel(info, text=title,    font=ctk.CTkFont(size=14, weight="bold"), text_color=T("TEXT_PRI")).pack(anchor="w")
-        ctk.CTkLabel(info, text=subtitle, font=ctk.CTkFont(size=12),               text_color=T("TEXT_DIM")).pack(anchor="w")
-
-        chip_holder = ctk.CTkFrame(row_f, fg_color="transparent")
-        chip_holder.pack(side="right")
-
-        color_display = ctk.CTkFrame(
-            chip_holder, width=32, height=32,
-            fg_color=init_color, corner_radius=7,
-            border_width=1, border_color=T("BORDER"),
-        )
-        color_display.pack(side="left")
-        color_display.pack_propagate(False)
-
-        color_label = ctk.CTkLabel(
-            chip_holder,
-            text=init_color.upper(),
-            font=ctk.CTkFont(family="Consolas", size=13),
-            text_color=T("TEXT_SEC"),
-        )
-        color_label.pack(side="left", padx=(8, 0))
-
-        def _pick(k=key, d=color_display, lb=color_label):
-            current = lb.cget("text")
-            result = colorchooser.askcolor(title="Выберите цвет", initialcolor=current)[1]
-            if result:
-                c = result.upper()
-                d.configure(fg_color=c)
-                lb.configure(text=c)
-                if "excel_colors" not in self.app.cfg:
-                    self.app.cfg["excel_colors"] = {}
-                self.app.cfg["excel_colors"][k] = c
-                self.app._persist_excel_colors()
-
-        self._ghost_btn(chip_holder, "Изменить", _pick, width=80).pack(side="left", padx=(8, 0))
+    def _on_color_picked(self, key: str, color: str):
+        set_excel_color(self.app.cfg, key, color)
+        self.app._persist_excel_colors()

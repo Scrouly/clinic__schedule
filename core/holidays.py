@@ -72,6 +72,19 @@ def from_form_rows(rows: Iterable[Tuple[int, int, str]]) -> List[list]:
     return sorted(result, key=sort_key)
 
 
+def transfers_from_rows(rows: Iterable) -> List[list]:
+    """Строки страницы «Переносы дней» (год, месяц, день) → записи для настроек по порядку дат.
+    Некорректные строки пропускаются."""
+    result = []
+    for row in rows:
+        try:
+            year, month, day = (int(x) for x in row)
+        except (TypeError, ValueError):
+            continue
+        result.append([year, month, day])
+    return sorted(result)
+
+
 class HolidayCalendar:
     def __init__(self, entries: Iterable):
         self._every_year = set()

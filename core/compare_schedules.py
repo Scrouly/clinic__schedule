@@ -10,7 +10,8 @@ import logging
 import os
 import copy
 import re
-from typing import NamedTuple
+from dataclasses import dataclass
+from typing import Any, NamedTuple, Optional
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.formatting.formatting import ConditionalFormattingList
@@ -314,6 +315,340 @@ def clean_hours(h_str):
         return str(h_str).strip().replace(" ", "").lower()
 
 
+_DIFF_FILL = PatternFill(start_color="FFE4B5", end_color="FFE4B5", fill_type="solid")
+_RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+_LEFT_ALIGN = Alignment(horizontal='left', vertical='center', wrap_text=True)
+_CENTER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
+_FONT_AUTO = Font(name="Segoe UI", size=10, italic=True, color="555555")
+_FONT_MANUAL = Font(name="Segoe UI", size=10, bold=True, color="000000")
+_SPACER_HEIGHT = 8.0
+
+
+@dataclass(frozen=True)
+class _SheetCtx:
+    """Раскладка одного листа: образцы стилей из шаблона и колонки итогов."""
+    ws: Any
+    is_mibs: bool
+    last_table_col: int
+    day_col_map: dict
+    total_cols: list
+    hours_total_col: Optional[int]
+    norm_col_letter: Optional[str]
+    h_col_letter: Optional[str]
+    orig_hours_row: int
+    sample_hours: list
+    sample_times: list
+    sample_night: Optional[list]
+
+
+@dataclass(frozen=True)
+class _CardRows:
+    """Номера строк одного блока врача (АВТО или РУЧНОЙ)."""
+    hours: int
+    times: int
+    night: Optional[int]
+
+    @property
+    def last(self) -> int:
+        return self.night if self.night is not None else self.times
+
+
+def _card_rows(start_row: int, is_mibs: bool):
+    """Строки двух блоков карточки врача: сначала АВТО, сразу под ним РУЧНОЙ."""
+    step = 3 if is_mibs else 2
+    def block(first):
+        return _CardRows(first, first + 1, first + 2 if is_mibs else None)
+    return block(start_row), block(start_row + step)
+
+
+def _find_first_doctor_row(ws, day_row_num: int) -> int:
+    """Первая строка врача.
+
+    ВАЖНО: на листе МИБС между шапкой и первым врачом есть дополнительная строка
+    подзаголовка («Ночные часы»), которой нет на других листах, поэтому нельзя
+    жёстко считать day_row_num+3: стили/шрифты/границы брались бы с чужой строки."""
+    for r in range(day_row_num + 3, ws.max_row + 1):
+        if is_doctor_name_row(ws.cell(row=r, column=1).value):
+            return r
+    return day_row_num + 3
+
+
+def _find_norm_column(ws, day_row_num: int, total_cols: list):
+    for col in total_cols:
+        val_header = ws.cell(row=day_row_num, column=col).value
+        if val_header and "норма" in str(val_header).lower():
+            return col
+    return total_cols[0] if total_cols else None
+
+
+def _find_hours_total_column(ws, day_row_num: int, total_cols: list):
+    for col in total_cols:
+        v1 = str(ws.cell(row=day_row_num, column=col).value or "").lower()
+        v2 = str(ws.cell(row=day_row_num + 1, column=col).value or "").lower()
+        if "часы" in v1 or "часы" in v2 or "час" in v2:
+            if "норма" not in v1 and "норма" not in v2:
+                return col
+    if len(total_cols) >= 3:
+        return total_cols[2]
+    return total_cols[-1] if total_cols else None
+
+
+def _sheet_context(ws, sheet_info: dict) -> _SheetCtx:
+    day_row_num = sheet_info['day_row_num']
+    day_col_map = sheet_info['day_col_map']
+    total_cols = sheet_info['total_cols']
+    is_mibs = ws.title.upper() == 'МИБС'
+    last_table_col = max(total_cols) if total_cols else max(day_col_map.values())
+
+    first_doc_row = _find_first_doctor_row(ws, day_row_num)
+    cols = range(1, last_table_col + 1)
+    norm_col = _find_norm_column(ws, day_row_num, total_cols)
+    hours_total_col = _find_hours_total_column(ws, day_row_num, total_cols)
+    return _SheetCtx(
+        ws=ws, is_mibs=is_mibs, last_table_col=last_table_col,
+        day_col_map=day_col_map, total_cols=total_cols,
+        hours_total_col=hours_total_col,
+        norm_col_letter=get_column_letter(norm_col) if norm_col else None,
+        h_col_letter=get_column_letter(hours_total_col) if hours_total_col else None,
+        orig_hours_row=first_doc_row,
+        sample_hours=[ws.cell(row=first_doc_row, column=c) for c in cols],
+        sample_times=[ws.cell(row=first_doc_row + 1, column=c) for c in cols],
+        sample_night=[ws.cell(row=first_doc_row + 2, column=c) for c in cols] if is_mibs else None,
+    )
+
+
+def _capture_footer(ws, first_doc_row: int, is_mibs: bool) -> list:
+    """Запоминает «подвал» (строки после последнего врача), чтобы вернуть его
+    после пересборки таблицы."""
+    last_doc_row = first_doc_row
+    for r in range(first_doc_row, ws.max_row + 1):
+        if is_doctor_name_row(ws.cell(row=r, column=1).value):
+            last_doc_row = r + (2 if is_mibs else 1)
+
+    footer_rows = []
+    for r in range(last_doc_row + 1, ws.max_row + 1):
+        row_cells = [ws.cell(row=r, column=c) for c in range(1, ws.max_column + 1)]
+        footer_rows.append({
+            'height': ws.row_dimensions[r].height,
+            'cells': [(c.value, c.has_style, copy.copy(c.font), copy.copy(c.border),
+                       copy.copy(c.fill), copy.copy(c.alignment), c.number_format) for c in row_cells]
+        })
+    return footer_rows
+
+
+def _restore_footer(ws, footer_rows: list, row: int) -> int:
+    """Переносит «подвал» с строки ``row``; возвращает следующую свободную строку."""
+    for f_row in footer_rows:
+        ws.row_dimensions[row].height = f_row['height']
+        for c_idx, (value, has_style, font, border, fill, alignment, number_format) in enumerate(f_row['cells'], 1):
+            cell = get_safe_cell(ws, row, c_idx)
+            cell.value = value
+            if has_style:
+                cell.font = font
+                cell.border = border
+                cell.fill = fill
+                cell.alignment = alignment
+                cell.number_format = number_format
+        row += 1
+    return row
+
+
+def _clear_table_area(ws, start_row: int) -> None:
+    """Снимает объединения и удаляет всё, начиная со строки первого врача."""
+    for r in [r for r in ws.merged_cells.ranges if r.min_row >= start_row]:
+        try:
+            ws.unmerge_cells(start_row=r.min_row, start_column=r.min_col, end_row=r.max_row, end_column=r.max_col)
+        except Exception:
+            ws.merged_cells.remove(r)
+    ws.delete_rows(start_row, amount=ws.max_row - start_row + 2)
+
+
+def _pair_doctors(auto_list: list, manual_list: list) -> list:
+    """Сопоставляет врачей авто- и ручного файла: сначала по ФИО и должности, затем
+    по одному ФИО; оставшиеся ручные записи добавляются в конец."""
+    paired, used = [], set()
+
+    def take(a_data, same_title):
+        for idx, m_data in enumerate(manual_list):
+            if idx in used or m_data['name'] != a_data['name']:
+                continue
+            if same_title and m_data['title'] != a_data['title']:
+                continue
+            used.add(idx)
+            return m_data
+        return None
+
+    for a_data in auto_list:
+        paired.append({'name': a_data['name'], 'auto': a_data,
+                       'manual': take(a_data, True) or take(a_data, False)})
+    for idx, m_data in enumerate(manual_list):
+        if idx not in used:
+            paired.append({'name': m_data['name'], 'auto': None, 'manual': m_data})
+    return paired
+
+
+def _shifted_or_stored(sample_cell, orig_row: int, new_row: int, stored):
+    """Формула из шаблона со сдвигом строки либо сохранённое значение итога."""
+    if sample_cell.value and str(sample_cell.value).startswith("="):
+        return shift_formula_rows(sample_cell.value, orig_row, new_row)
+    return stored
+
+
+def _render_block(sc: _SheetCtx, rows: _CardRows, data, label: str, doc_name: str,
+                  title: str, font: Font) -> None:
+    """Рисует один блок врача (АВТО либо РУЧНОЙ): стили, значения дней, ФИО,
+    должность, итоги и подсветку «норма против часов»."""
+    ws, is_mibs = sc.ws, sc.is_mibs
+    for col_idx in range(1, sc.last_table_col + 1):
+        copy_cell_styles(sc.sample_hours[col_idx - 1], get_safe_cell(ws, rows.hours, col_idx))
+        copy_cell_styles(sc.sample_times[col_idx - 1], get_safe_cell(ws, rows.times, col_idx))
+        if is_mibs:
+            copy_cell_styles(sc.sample_night[col_idx - 1], get_safe_cell(ws, rows.night, col_idx))
+
+    if data:
+        for day, col in sc.day_col_map.items():
+            get_safe_cell(ws, rows.hours, col).value = to_numeric_if_possible(data['hours'][day])
+            get_safe_cell(ws, rows.times, col).value = data['times'][day]
+            if is_mibs:
+                get_safe_cell(ws, rows.night, col).value = to_numeric_if_possible(data['night'][day])
+
+    name_cell, title_cell = sc.sample_hours[0], sc.sample_hours[1]
+    merge_and_style_range(ws, rows.hours, 1, rows.last, 1,
+                          f"{doc_name} ({label})" if data else f"{doc_name} ({label}) — Отсутствует",
+                          font, _LEFT_ALIGN, name_cell.fill, name_cell.border)
+    merge_and_style_range(ws, rows.hours, 2, rows.last, 2, title,
+                          font, _LEFT_ALIGN, title_cell.fill, title_cell.border)
+
+    for idx, col in enumerate(sc.total_cols):
+        sample = sc.sample_hours[col - 1]
+        stored = data['totals'][idx] if (data and idx < len(data['totals'])) else ""
+        val = _shifted_or_stored(sample, sc.orig_hours_row, rows.hours, stored)
+
+        if is_mibs and col == sc.hours_total_col:
+            # В шаблоне колонка "Часы" объединена только на строках Часы/Время,
+            # а строка "Ночные часы" — отдельная ячейка со своим значением.
+            merge_and_style_range(ws, rows.hours, col, rows.times, col, val,
+                                  font, _CENTER_ALIGN, sample.fill, sample.border)
+            night_sample = sc.sample_night[col - 1]
+            night_totals = data.get('night_totals', []) if data else []
+            night_stored = night_totals[idx] if idx < len(night_totals) else ""
+            night_val = _shifted_or_stored(night_sample, sc.orig_hours_row + 2, rows.night, night_stored)
+            style_single_cell(ws, rows.night, col, night_val, font, _CENTER_ALIGN,
+                              night_sample.fill, night_sample.border)
+        else:
+            merge_and_style_range(ws, rows.hours, col, rows.last, col, val,
+                                  font, _CENTER_ALIGN, sample.fill, sample.border)
+
+    if sc.norm_col_letter and sc.h_col_letter and data:
+        norm_range = f"{sc.norm_col_letter}{rows.hours}:{sc.norm_col_letter}{rows.hours}"
+        hours_ref = f'${sc.h_col_letter}${rows.hours}'
+        ws.conditional_formatting.add(norm_range, CellIsRule(operator='lessThan', formula=[hours_ref], fill=_RED_FILL))
+        ws.conditional_formatting.add(norm_range, CellIsRule(operator='greaterThan', formula=[hours_ref], fill=_GREEN_FILL))
+
+
+def _highlight_total_mismatches(sc: _SheetCtx, a: _CardRows, m: _CardRows) -> None:
+    """Условное форматирование итогов: ячейка подсвечивается, если не равна парной."""
+    ws = sc.ws
+
+    def pair(col_letter, row_a, row_m):
+        for here, other in ((row_a, row_m), (row_m, row_a)):
+            ws.conditional_formatting.add(
+                f"{col_letter}{here}:{col_letter}{here}",
+                CellIsRule(operator='notEqual', formula=[f'${col_letter}${other}'], fill=_DIFF_FILL))
+
+    for col in sc.total_cols:
+        letter = get_column_letter(col)
+        pair(letter, a.hours, m.hours)
+        if sc.is_mibs and col == sc.hours_total_col:
+            pair(letter, a.night, m.night)       # «Ночные часы» — своя ячейка, не мёрж
+
+
+def _mark_day_differences(sc: _SheetCtx, a_data, m_data, a: _CardRows, m: _CardRows) -> int:
+    """Закрашивает расхождения по дням 1–31; возвращает их число."""
+    ws, found = sc.ws, 0
+    kinds = [('hours', clean_hours, 'hours'), ('times', clean_time, 'times')]
+    if sc.is_mibs:
+        kinds.append(('night', clean_hours, 'night'))
+    for day, col in sc.day_col_map.items():
+        for key, clean, row_attr in kinds:
+            a_val = a_data[key][day] if a_data else ""
+            m_val = m_data[key][day] if m_data else ""
+            if clean(a_val) != clean(m_val):
+                get_safe_cell(ws, getattr(a, row_attr), col).fill = _DIFF_FILL
+                get_safe_cell(ws, getattr(m, row_attr), col).fill = _DIFF_FILL
+                found += 1
+    return found
+
+
+def _has_multiple_intervals(data) -> bool:
+    return bool(data) and any('/' in str(t) or '\\' in str(t) for t in data['times'].values())
+
+
+def _set_card_heights(sc: _SheetCtx, rows: _CardRows, data) -> None:
+    ws = sc.ws
+    ws.row_dimensions[rows.hours].height = 15
+    ws.row_dimensions[rows.times].height = 45.0 if _has_multiple_intervals(data) else 22.5
+    if sc.is_mibs:
+        ws.row_dimensions[rows.night].height = 15
+
+
+def _underline_card(sc: _SheetCtx, last_row: int, cache: dict) -> None:
+    """Нижняя граница карточки. Результат зависит только от прежней границы ячейки,
+    а их немного: запоминаем по номеру прежней границы (``cache``)."""
+    ws = sc.ws
+    for col_idx in range(1, sc.last_table_col + 1):
+        cell = ws.cell(row=last_row, column=col_idx)
+        old_border_id = cell._style.borderId if cell._style is not None else 0
+        new_border_id = cache.get(old_border_id)
+        if new_border_id is None:
+            cell.border = Border(left=cell.border.left, right=cell.border.right,
+                                 top=cell.border.top, bottom=Side(style='medium', color='444444'))
+            cache[old_border_id] = cell._style.borderId
+        else:
+            style_array(cell).borderId = new_border_id
+
+
+def _add_spacer_row(sc: _SheetCtx, row: int) -> None:
+    ws = sc.ws
+    ws.row_dimensions[row].height = _SPACER_HEIGHT
+    no_fill, no_border = PatternFill(fill_type=None), Border()
+    for col_idx in range(1, sc.last_table_col + 1):
+        cell = get_safe_cell(ws, row, col_idx)
+        cell.value = None
+        styles_for(ws.parent).apply(cell, fill=no_fill, border=no_border)
+
+
+def _render_sheet(ws, auto_info: dict, manual_info: dict) -> int:
+    """Пересобирает лист: каждый врач — блок АВТО и под ним РУЧНОЙ. Возвращает число расхождений."""
+    sc = _sheet_context(ws, auto_info)
+    start_row = sc.orig_hours_row
+    footer_rows = _capture_footer(ws, start_row, sc.is_mibs)
+    _clear_table_area(ws, start_row)
+
+    border_cache: dict = {}
+    found, current_row = 0, start_row
+    for pair in _pair_doctors(auto_info['doctors'], manual_info.get('doctors', [])):
+        a_data, m_data = pair['auto'], pair['manual']
+        title = a_data['title'] if a_data else (m_data['title'] if m_data else "")
+        a_rows, m_rows = _card_rows(current_row, sc.is_mibs)
+
+        _render_block(sc, a_rows, a_data, "АВТО", pair['name'], title, _FONT_AUTO)
+        _render_block(sc, m_rows, m_data, "РУЧНОЙ", pair['name'], title, _FONT_MANUAL)
+        _highlight_total_mismatches(sc, a_rows, m_rows)
+        found += _mark_day_differences(sc, a_data, m_data, a_rows, m_rows)
+        _set_card_heights(sc, a_rows, a_data)
+        _set_card_heights(sc, m_rows, m_data)
+        _underline_card(sc, m_rows.last, border_cache)
+
+        current_row = m_rows.last + 1
+        _add_spacer_row(sc, current_row)
+        current_row += 1
+
+    _restore_footer(ws, footer_rows, current_row)
+    return found
+
+
 def compare(auto_path: str, manual_path: str) -> CompareResult:
     """Главная функция сравнения с генерацией графического отчета.
 
@@ -326,377 +661,17 @@ def compare(auto_path: str, manual_path: str) -> CompareResult:
     manual_db = parse_full_sheet_data(manual_path)
 
     wb_report = load_workbook(auto_path)
-
     for sheet_name in wb_report.sheetnames:
         wb_report[sheet_name].conditional_formatting = ConditionalFormattingList()
-
     for s in list(wb_report.sheetnames):
         if 'ознакомление' in s.lower() or 'отчет_по_ошибкам' in s.lower():
             del wb_report[s]
 
-    diff_fill = PatternFill(start_color="FFE4B5", end_color="FFE4B5", fill_type="solid")
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
-    left_center_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-    font_a_name = Font(name="Segoe UI", size=10, italic=True, color="555555")
-    font_m_name = Font(name="Segoe UI", size=10, bold=True, color="000000")
     total_diffs_found = 0
-
     for sheet_name in wb_report.sheetnames:
-        if sheet_name not in auto_db:
-            continue
-
-        ws = wb_report[sheet_name]
-        day_row_num = auto_db[sheet_name]['day_row_num']
-        day_col_map = auto_db[sheet_name]['day_col_map']
-        total_cols = auto_db[sheet_name]['total_cols']
-
-        is_mibs = (sheet_name.upper() == 'МИБС')
-        last_table_col = max(total_cols) if total_cols else max(day_col_map.values())
-
-        # ВАЖНО: на листе МИБС между шапкой и первым врачом есть дополнительная
-        # строка подзаголовка ("Ночные часы"), которой нет на других листах.
-        # Поэтому нельзя жёстко считать day_row_num+3 первой строкой врача —
-        # ищем её по факту, иначе стили/шрифты/границы берутся с чужой строки.
-        first_doc_row = None
-        for r in range(day_row_num + 3, ws.max_row + 1):
-            v = ws.cell(row=r, column=1).value
-            if is_doctor_name_row(v):
-                first_doc_row = r
-                break
-        if first_doc_row is None:
-            first_doc_row = day_row_num + 3
-
-        sample_hours_cells = [ws.cell(row=first_doc_row, column=c) for c in range(1, last_table_col + 1)]
-        sample_times_cells = [ws.cell(row=first_doc_row + 1, column=c) for c in range(1, last_table_col + 1)]
-        sample_night_cells = [ws.cell(row=first_doc_row + 2, column=c) for c in
-                              range(1, last_table_col + 1)] if is_mibs else None
-
-        orig_hours_row = first_doc_row
-        start_clear_row = first_doc_row
-
-        norm_col = None
-        for col in total_cols:
-            val_header = ws.cell(row=day_row_num, column=col).value
-            if val_header and "норма" in str(val_header).lower():
-                norm_col = col
-                break
-        if not norm_col and total_cols:
-            norm_col = total_cols[0]
-
-        hours_total_col = None
-        for col in total_cols:
-            v1 = str(ws.cell(row=day_row_num, column=col).value or "").lower()
-            v2 = str(ws.cell(row=day_row_num + 1, column=col).value or "").lower()
-            if "часы" in v1 or "часы" in v2 or "час" in v2:
-                if "норма" not in v1 and "норма" not in v2:
-                    hours_total_col = col
-                    break
-        if not hours_total_col and len(total_cols) >= 3:
-            hours_total_col = total_cols[2]
-        elif not hours_total_col and total_cols:
-            hours_total_col = total_cols[-1]
-
-        norm_col_letter = get_column_letter(norm_col) if norm_col else None
-        h_col_letter = get_column_letter(hours_total_col) if hours_total_col else None
-
-        last_doc_row = start_clear_row
-        for r in range(start_clear_row, ws.max_row + 1):
-            v = ws.cell(row=r, column=1).value
-            if is_doctor_name_row(v):
-                last_doc_row = r + (2 if is_mibs else 1)
-
-        footer_rows = []
-        if last_doc_row < ws.max_row:
-            for r in range(last_doc_row + 1, ws.max_row + 1):
-                row_cells = [ws.cell(row=r, column=c) for c in range(1, ws.max_column + 1)]
-                footer_rows.append({
-                    'height': ws.row_dimensions[r].height,
-                    'cells': [(c.value, c.has_style, copy.copy(c.font), copy.copy(c.border),
-                               copy.copy(c.fill), copy.copy(c.alignment), c.number_format) for c in row_cells]
-                })
-
-        ranges_to_remove = [r for r in ws.merged_cells.ranges if r.min_row >= start_clear_row]
-        for r in ranges_to_remove:
-            try:
-                ws.unmerge_cells(start_row=r.min_row, start_column=r.min_col, end_row=r.max_row, end_column=r.max_col)
-            except Exception:
-                ws.merged_cells.remove(r)
-
-        ws.delete_rows(start_clear_row, amount=ws.max_row - start_clear_row + 2)
-
-        auto_list = auto_db[sheet_name]['doctors']
-        manual_list = manual_db.get(sheet_name, {}).get('doctors', [])
-
-        paired_docs = []
-        used_manual_indices = set()
-
-        for a_data in auto_list:
-            m_match = None
-            for idx, m_data in enumerate(manual_list):
-                if idx not in used_manual_indices and m_data['name'] == a_data['name'] and m_data['title'] == a_data[
-                    'title']:
-                    m_match = m_data
-                    used_manual_indices.add(idx)
-                    break
-            if not m_match:
-                for idx, m_data in enumerate(manual_list):
-                    if idx not in used_manual_indices and m_data['name'] == a_data['name']:
-                        m_match = m_data
-                        used_manual_indices.add(idx)
-                        break
-            paired_docs.append({'name': a_data['name'], 'auto': a_data, 'manual': m_match})
-
-        for idx, m_data in enumerate(manual_list):
-            if idx not in used_manual_indices:
-                paired_docs.append({'name': m_data['name'], 'auto': None, 'manual': m_data})
-
-        current_row = start_clear_row
-        bottom_border_ids: dict = {}            # прежняя граница → граница с нижней чертой
-        no_fill, no_border = PatternFill(fill_type=None), Border()
-
-        for pair in paired_docs:
-            a_data = pair['auto']
-            m_data = pair['manual']
-            doc_name = pair['name']
-            title = a_data['title'] if a_data else (m_data['title'] if m_data else "")
-
-            a_hours_r = current_row
-            a_times_r = current_row + 1
-            a_night_r = current_row + 2 if is_mibs else None
-
-            m_hours_r = current_row + 3 if is_mibs else current_row + 2
-            m_times_r = current_row + 4 if is_mibs else current_row + 3
-            m_night_r = current_row + 5 if is_mibs else None
-
-            # РЕНДЕРИНГ БЛОКА АВТО
-            for col_idx in range(1, last_table_col + 1):
-                copy_cell_styles(sample_hours_cells[col_idx - 1], get_safe_cell(ws, a_hours_r, col_idx))
-                copy_cell_styles(sample_times_cells[col_idx - 1], get_safe_cell(ws, a_times_r, col_idx))
-                if is_mibs:
-                    copy_cell_styles(sample_night_cells[col_idx - 1], get_safe_cell(ws, a_night_r, col_idx))
-
-            if a_data:
-                for day, col in day_col_map.items():
-                    get_safe_cell(ws, a_hours_r, col).value = to_numeric_if_possible(a_data['hours'][day])
-                    get_safe_cell(ws, a_times_r, col).value = a_data['times'][day]
-                    if is_mibs:
-                        get_safe_cell(ws, a_night_r, col).value = to_numeric_if_possible(a_data['night'][day])
-
-            merge_and_style_range(ws, a_hours_r, 1, a_night_r if is_mibs else a_times_r, 1,
-                                  f"{doc_name} (АВТО)" if a_data else f"{doc_name} (АВТО) — Отсутствует",
-                                  font_a_name, left_center_align, sample_hours_cells[0].fill,
-                                  sample_hours_cells[0].border)
-            merge_and_style_range(ws, a_hours_r, 2, a_night_r if is_mibs else a_times_r, 2, title,
-                                  font_a_name, left_center_align, sample_hours_cells[1].fill,
-                                  sample_hours_cells[1].border)
-
-            for idx, col in enumerate(total_cols):
-                orig_sample_cell = sample_hours_cells[col - 1]
-                if orig_sample_cell.value and str(orig_sample_cell.value).startswith("="):
-                    val = shift_formula_rows(orig_sample_cell.value, orig_hours_row, a_hours_r)
-                else:
-                    val = a_data['totals'][idx] if (a_data and idx < len(a_data['totals'])) else ""
-
-                if is_mibs and col == hours_total_col:
-                    # В шаблоне колонка "Часы" объединена только на строках
-                    # Часы/Время, а строка "Ночные часы" — отдельная ячейка
-                    # со своим значением (не часть объединённого диапазона).
-                    merge_and_style_range(ws, a_hours_r, col, a_times_r, col, val,
-                                          font_a_name, center_align, sample_hours_cells[col - 1].fill,
-                                          sample_hours_cells[col - 1].border)
-
-                    night_sample_cell = sample_night_cells[col - 1]
-                    if night_sample_cell.value and str(night_sample_cell.value).startswith("="):
-                        night_val = shift_formula_rows(night_sample_cell.value, orig_hours_row + 2, a_night_r)
-                    else:
-                        night_totals = a_data.get('night_totals', []) if a_data else []
-                        night_val = night_totals[idx] if idx < len(night_totals) else ""
-
-                    style_single_cell(ws, a_night_r, col, night_val, font_a_name, center_align,
-                                      night_sample_cell.fill, night_sample_cell.border)
-                else:
-                    merge_and_style_range(ws, a_hours_r, col, a_night_r if is_mibs else a_times_r, col, val,
-                                          font_a_name, center_align, sample_hours_cells[col - 1].fill,
-                                          sample_hours_cells[col - 1].border)
-
-            if norm_col_letter and h_col_letter and a_data:
-                norm_range_a = f"{norm_col_letter}{a_hours_r}:{norm_col_letter}{a_hours_r}"
-                rule_over_a = CellIsRule(operator='lessThan', formula=[f'${h_col_letter}${a_hours_r}'], fill=red_fill)
-                rule_under_a = CellIsRule(operator='greaterThan', formula=[f'${h_col_letter}${a_hours_r}'],
-                                          fill=green_fill)
-                ws.conditional_formatting.add(norm_range_a, rule_over_a)
-                ws.conditional_formatting.add(norm_range_a, rule_under_a)
-
-            # РЕНДЕРИНГ БЛОКА РУЧНОЙ
-            for col_idx in range(1, last_table_col + 1):
-                copy_cell_styles(sample_hours_cells[col_idx - 1], get_safe_cell(ws, m_hours_r, col_idx))
-                copy_cell_styles(sample_times_cells[col_idx - 1], get_safe_cell(ws, m_times_r, col_idx))
-                if is_mibs:
-                    copy_cell_styles(sample_night_cells[col_idx - 1], get_safe_cell(ws, m_night_r, col_idx))
-
-            if m_data:
-                for day, col in day_col_map.items():
-                    get_safe_cell(ws, m_hours_r, col).value = to_numeric_if_possible(m_data['hours'][day])
-                    get_safe_cell(ws, m_times_r, col).value = m_data['times'][day]
-                    if is_mibs:
-                        get_safe_cell(ws, m_night_r, col).value = to_numeric_if_possible(m_data['night'][day])
-
-            merge_and_style_range(ws, m_hours_r, 1, m_night_r if is_mibs else m_times_r, 1,
-                                  f"{doc_name} (РУЧНОЙ)" if m_data else f"{doc_name} (РУЧНОЙ) — Отсутствует",
-                                  font_m_name, left_center_align, sample_hours_cells[0].fill,
-                                  sample_hours_cells[0].border)
-            merge_and_style_range(ws, m_hours_r, 2, m_night_r if is_mibs else m_times_r, 2, title,
-                                  font_m_name, left_center_align, sample_hours_cells[1].fill,
-                                  sample_hours_cells[1].border)
-
-            for idx, col in enumerate(total_cols):
-                orig_sample_cell = sample_hours_cells[col - 1]
-                if orig_sample_cell.value and str(orig_sample_cell.value).startswith("="):
-                    val = shift_formula_rows(orig_sample_cell.value, orig_hours_row, m_hours_r)
-                else:
-                    val = m_data['totals'][idx] if (m_data and idx < len(m_data['totals'])) else ""
-
-                if is_mibs and col == hours_total_col:
-                    merge_and_style_range(ws, m_hours_r, col, m_times_r, col, val,
-                                          font_m_name, center_align, sample_hours_cells[col - 1].fill,
-                                          sample_hours_cells[col - 1].border)
-
-                    night_sample_cell = sample_night_cells[col - 1]
-                    if night_sample_cell.value and str(night_sample_cell.value).startswith("="):
-                        night_val = shift_formula_rows(night_sample_cell.value, orig_hours_row + 2, m_night_r)
-                    else:
-                        night_totals = m_data.get('night_totals', []) if m_data else []
-                        night_val = night_totals[idx] if idx < len(night_totals) else ""
-
-                    style_single_cell(ws, m_night_r, col, night_val, font_m_name, center_align,
-                                      night_sample_cell.fill, night_sample_cell.border)
-                else:
-                    merge_and_style_range(ws, m_hours_r, col, m_night_r if is_mibs else m_times_r, col, val,
-                                          font_m_name, center_align, sample_hours_cells[col - 1].fill,
-                                          sample_hours_cells[col - 1].border)
-
-            if norm_col_letter and h_col_letter and m_data:
-                norm_range_m = f"{norm_col_letter}{m_hours_r}:{norm_col_letter}{m_hours_r}"
-                rule_over_m = CellIsRule(operator='lessThan', formula=[f'${h_col_letter}${m_hours_r}'], fill=red_fill)
-                rule_under_m = CellIsRule(operator='greaterThan', formula=[f'${h_col_letter}${m_hours_r}'],
-                                          fill=green_fill)
-                ws.conditional_formatting.add(norm_range_m, rule_over_m)
-                ws.conditional_formatting.add(norm_range_m, rule_under_m)
-
-            # СВЕРКА ИТОГОВ СУММ
-            for col in total_cols:
-                col_letter = get_column_letter(col)
-                tot_coord_a = f"{col_letter}{a_hours_r}"
-                tot_coord_m = f"{col_letter}{m_hours_r}"
-
-                rule_tot_a = CellIsRule(operator='notEqual', formula=[f'${col_letter}${m_hours_r}'], fill=diff_fill)
-                ws.conditional_formatting.add(f"{tot_coord_a}:{tot_coord_a}", rule_tot_a)
-
-                rule_tot_m = CellIsRule(operator='notEqual', formula=[f'${col_letter}${a_hours_r}'], fill=diff_fill)
-                ws.conditional_formatting.add(f"{tot_coord_m}:{tot_coord_m}", rule_tot_m)
-
-                if is_mibs and col == hours_total_col:
-                    # Отдельная сверка итога "Ночные часы" (своя ячейка, не мёрж)
-                    tot_coord_a_n = f"{col_letter}{a_night_r}"
-                    tot_coord_m_n = f"{col_letter}{m_night_r}"
-
-                    rule_tot_a_n = CellIsRule(operator='notEqual', formula=[f'${col_letter}${m_night_r}'],
-                                              fill=diff_fill)
-                    ws.conditional_formatting.add(f"{tot_coord_a_n}:{tot_coord_a_n}", rule_tot_a_n)
-
-                    rule_tot_m_n = CellIsRule(operator='notEqual', formula=[f'${col_letter}${a_night_r}'],
-                                              fill=diff_fill)
-                    ws.conditional_formatting.add(f"{tot_coord_m_n}:{tot_coord_m_n}", rule_tot_m_n)
-
-            # СВЕРКА И ПОДСВЕТКА РАСХОЖДЕНИЙ ДНЕЙ (1-31)
-            for day, col in day_col_map.items():
-                a_h = a_data['hours'][day] if a_data else ""
-                m_h = m_data['hours'][day] if m_data else ""
-                a_t = a_data['times'][day] if a_data else ""
-                m_t = m_data['times'][day] if m_data else ""
-
-                if clean_hours(a_h) != clean_hours(m_h):
-                    get_safe_cell(ws, a_hours_r, col).fill = diff_fill
-                    get_safe_cell(ws, m_hours_r, col).fill = diff_fill
-                    total_diffs_found += 1
-
-                if clean_time(a_t) != clean_time(m_t):
-                    get_safe_cell(ws, a_times_r, col).fill = diff_fill
-                    get_safe_cell(ws, m_times_r, col).fill = diff_fill
-                    total_diffs_found += 1
-
-                if is_mibs:
-                    a_n = a_data['night'][day] if a_data else ""
-                    m_n = m_data['night'][day] if m_data else ""
-                    if clean_hours(a_n) != clean_hours(m_n):
-                        get_safe_cell(ws, a_night_r, col).fill = diff_fill
-                        get_safe_cell(ws, m_night_r, col).fill = diff_fill
-                        total_diffs_found += 1
-
-            has_mult_auto = False
-            if a_data:
-                for t_val in a_data['times'].values():
-                    if '/' in str(t_val) or '\\' in str(t_val):
-                        has_mult_auto = True
-                        break
-
-            has_mult_manual = False
-            if m_data:
-                for t_val in m_data['times'].values():
-                    if '/' in str(t_val) or '\\' in str(t_val):
-                        has_mult_manual = True
-                        break
-
-            ws.row_dimensions[a_hours_r].height = 15
-            ws.row_dimensions[a_times_r].height = 45.0 if has_mult_auto else 22.5
-            if is_mibs: ws.row_dimensions[a_night_r].height = 15
-
-            ws.row_dimensions[m_hours_r].height = 15
-            ws.row_dimensions[m_times_r].height = 45.0 if has_mult_manual else 22.5
-            if is_mibs: ws.row_dimensions[m_night_r].height = 15
-
-            last_card_row = m_night_r if is_mibs else m_times_r
-            for col_idx in range(1, last_table_col + 1):
-                cell = ws.cell(row=last_card_row, column=col_idx)
-                # Нижняя граница зависит только от прежней границы ячейки, а их немного:
-                # результат запоминаем по номеру прежней границы.
-                old_border_id = cell._style.borderId if cell._style is not None else 0
-                new_border_id = bottom_border_ids.get(old_border_id)
-                if new_border_id is None:
-                    cell.border = Border(
-                        left=cell.border.left, right=cell.border.right,
-                        top=cell.border.top, bottom=Side(style='medium', color='444444')
-                    )
-                    bottom_border_ids[old_border_id] = cell._style.borderId
-                else:
-                    style_array(cell).borderId = new_border_id
-
-            current_row = last_card_row + 1
-
-            ws.row_dimensions[current_row].height = 8.0
-            for col_idx in range(1, last_table_col + 1):
-                cell = get_safe_cell(ws, current_row, col_idx)
-                cell.value = None
-                styles_for(ws.parent).apply(cell, fill=no_fill, border=no_border)
-
-            current_row += 1
-
-        for f_row in footer_rows:
-            ws.row_dimensions[current_row].height = f_row['height']
-            for c_idx, c_data in enumerate(f_row['cells'], 1):
-                cell = get_safe_cell(ws, current_row, c_idx)
-                cell.value = c_data[0]
-                if c_data[1]:
-                    cell.font = c_data[2]
-                    cell.border = c_data[3]
-                    cell.fill = c_data[4]
-                    cell.alignment = c_data[5]
-                    cell.number_format = c_data[6]
-            current_row += 1
+        if sheet_name in auto_db:
+            total_diffs_found += _render_sheet(wb_report[sheet_name], auto_db[sheet_name],
+                                               manual_db.get(sheet_name, {}))
 
     output_path = build_output_path(auto_path)
 
