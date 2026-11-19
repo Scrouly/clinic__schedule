@@ -31,20 +31,23 @@ def style_array(cell) -> StyleArray:
 
 
 class StyleIds:
-    """Кэш индексов стилей одной книги: «объект стиля → его номер в списке книги»."""
+    """Кэш индексов стилей одной книги: «объект стиля → его номер в списке книги».
+
+    Хранит ТОЛЬКО списки стилей книги, а не саму книгу: кэш лежит в WeakKeyDictionary с ключом
+    «книга», и ссылка на книгу из значения не давала бы ей освободиться (утечка на каждую
+    генерацию и каждое сравнение)."""
 
     def __init__(self, wb):
-        self._wb = wb
+        self._collections = {kind: getattr(wb, attr) for kind, (attr, _) in _KINDS.items()}
         self._memo: dict = {}
 
     def index(self, kind: str, style_obj) -> int:
         key = (kind, id(style_obj))
         hit = self._memo.get(key)
         if hit is None:
-            collection = getattr(self._wb, _KINDS[kind][0])
             # В книгу кладём собственную копию объекта, как и при ``cell.fill = copy(fill)``.
             # Сам объект храним в кэше, чтобы его id не мог быть выдан другому объекту.
-            hit = (style_obj, collection.add(copy.copy(style_obj)))
+            hit = (style_obj, self._collections[kind].add(copy.copy(style_obj)))
             self._memo[key] = hit
         return hit[1]
 

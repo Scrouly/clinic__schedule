@@ -13,6 +13,9 @@ gui_state.json
 *.log
 *.bak
 
+# ── Локальные настройки: правила с фамилиями (dental_role_by_cabinet), цвета, праздники ──
+auto_schedule_config.json
+
 # ── Сборка ──
 build/
 dist/
