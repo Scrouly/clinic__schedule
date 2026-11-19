@@ -1,5 +1,6 @@
 """Загрузка конфига: создание файла, миграция новых ключей, сортировка дат,
-путь к файлу (в том числе переменная окружения CITYCLINIC_CONFIG для тестов)."""
+путь к файлу (в том числе переменная окружения CITYCLINIC_CONFIG для тестов),
+устойчивость к испорченному файлу."""
 import copy
 import json
 import os
@@ -7,7 +8,7 @@ import sys
 
 import pytest
 
-from core import config
+from core import config, holidays
 
 
 @pytest.fixture
@@ -108,17 +109,82 @@ def test_complete_sorted_file_is_not_rewritten(cfg_path):
     cfg_path.write_text(raw, encoding="utf-8")
     config.load_config()
     assert cfg_path.read_text(encoding="utf-8") == raw
+    assert not os.path.exists(str(cfg_path) + ".bak")
 
 
-def test_shipped_config_has_the_official_april_2026_transfer():
-    """Рабочий день с понедельника 20.04.2026 переносится на субботу 25.04.2026 —
-    и в конфиге из репозитория, и в значениях по умолчанию."""
-    import json
-    import pathlib
+# ── Значения по умолчанию ────────────────────────────────────────────────────
 
-    from core.config import DEFAULT_CONFIG
-    shipped = json.loads((pathlib.Path(__file__).parent.parent / "auto_schedule_config.json")
-                         .read_text(encoding="utf-8"))
-    for cfg in (shipped, DEFAULT_CONFIG):
-        assert cfg["transfers_work_days"] == [[2026, 4, 25]]
-        assert cfg["transfers_rest_days"] == [[2026, 4, 20]]
+def test_default_config_has_the_official_april_2026_transfer():
+    """Рабочий день с понедельника 20.04.2026 переносится на субботу 25.04.2026."""
+    assert config.DEFAULT_CONFIG["transfers_work_days"] == [[2026, 4, 25]]
+    assert config.DEFAULT_CONFIG["transfers_rest_days"] == [[2026, 4, 20]]
+
+
+def test_radunitsa_is_dated_not_recurring():
+    """Радоница плавающая: как «каждый год» 21.04 она давала бы ложный выходной в 2027 и позже."""
+    holidays_by = config.DEFAULT_CONFIG["holidays_by"]
+    assert [4, 21] not in holidays_by
+    assert [2026, 4, 21] in holidays_by and [2027, 5, 11] in holidays_by
+
+
+def test_every_default_holiday_is_a_valid_entry():
+    for entry in config.DEFAULT_CONFIG["holidays_by"]:
+        holidays.normalize_holiday(entry)
+
+
+# ── Испорченный файл не роняет программу ─────────────────────────────────────
+
+def test_broken_json_gives_defaults_keeps_a_backup_and_reports(cfg_path):
+    cfg_path.write_text('{"hours_control": {', encoding="utf-8")        # оборванный файл
+    loaded = config.load_config()
+    assert loaded["hours_control"] == config.DEFAULT_CONFIG["hours_control"]
+    assert (cfg_path.parent / (cfg_path.name + ".bak")).read_text(encoding="utf-8") == '{"hours_control": {'
+    assert not cfg_path.exists()
+    assert any("не прочитан" in w and ".bak" in w for w in config.LOAD_WARNINGS)
+
+
+def test_binary_garbage_is_handled_like_broken_json(cfg_path):
+    cfg_path.write_bytes(b"\xff\xfe\x00garbage\x80")
+    assert config.load_config()["month_ru"] == config.DEFAULT_CONFIG["month_ru"]
+    assert config.LOAD_WARNINGS
+
+
+def test_json_that_is_not_a_dictionary_is_rejected(cfg_path):
+    cfg_path.write_text("[1, 2, 3]", encoding="utf-8")
+    assert config.load_config()["holidays_by"] == sorted(config.DEFAULT_CONFIG["holidays_by"], key=holidays.sort_key)
+    assert config.LOAD_WARNINGS
+
+
+def test_section_of_the_wrong_type_falls_back_to_default(cfg_path):
+    cfg_path.write_text(json.dumps({"holidays_by": None, "hours_control": "x", "scoring": {"min_accept_score": -0.5}}),
+                        encoding="utf-8")
+    loaded = config.load_config()
+    assert loaded["hours_control"] == config.DEFAULT_CONFIG["hours_control"]
+    assert loaded["scoring"] == {"min_accept_score": -0.5}              # исправный раздел сохранён
+    assert [4, 21] not in loaded["holidays_by"] and len(loaded["holidays_by"]) == len(config.DEFAULT_CONFIG["holidays_by"])
+    assert len(config.LOAD_WARNINGS) == 2
+
+
+def test_malformed_transfer_entries_are_dropped_not_fatal(cfg_path):
+    data = copy.deepcopy(config.DEFAULT_CONFIG)
+    data["transfers_work_days"] = [[2026, 4, 25], [4, 25], "мусор", [2026, 4, 1.5], [2026, 5, 2]]
+    cfg_path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = config.load_config()
+    assert loaded["transfers_work_days"] == [[2026, 4, 25], [2026, 5, 2]]
+    assert len(config.LOAD_WARNINGS) == 3
+
+
+def test_warnings_do_not_pile_up_between_loads(cfg_path):
+    cfg_path.write_text("{oops", encoding="utf-8")
+    config.load_config()
+    assert len(config.LOAD_WARNINGS) == 1
+    config.load_config()                       # файла уже нет (ушёл в .bak) — предупреждений нет
+    assert config.LOAD_WARNINGS == []
+
+
+def test_save_after_a_broken_file_does_not_destroy_the_backup(cfg_path):
+    cfg_path.write_text("{oops", encoding="utf-8")
+    loaded = config.load_config()
+    config.save_config(loaded)
+    assert (cfg_path.parent / (cfg_path.name + ".bak")).read_text(encoding="utf-8") == "{oops"
+    assert _read(cfg_path) == loaded

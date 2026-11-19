@@ -65,8 +65,28 @@ APP_DIR      = _get_app_dir()
 RESOURCE_DIR = _get_resource_dir()
 
 GUI_STATE_FILE = os.path.join(APP_DIR,      "gui_state.json")
-CONFIG_FILE    = core_config.CONFIG_FILE      # один путь для GUI и core
 LOGO_PATH      = os.path.join(RESOURCE_DIR, "resources", "logo.png")
+
+# Названия разделов настроек для сообщений пользователю (ключи — разделы файла настроек).
+_SECTION_TITLES = {
+    "title_keywords":      "Направления",
+    "holidays_by":         "Праздники",
+    "hours_control":       "Нормы часов",
+    "norms_by_specialty":  "Нормы часов",
+    "transfers_work_days": "Переносы",
+    "transfers_rest_days": "Переносы",
+    "excel_colors":        "Цвета Excel",
+}
+
+
+def _section_names(keys) -> str:
+    """«Праздники, Нормы часов» — без повторов, в порядке появления."""
+    names = []
+    for key in keys:
+        name = _SECTION_TITLES.get(key, key)
+        if name not in names:
+            names.append(name)
+    return ", ".join(names)
 
 
 # ── Логирование ───────────────────────────────────────────────────────────────
@@ -101,9 +121,16 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         self.minsize(920, 560)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Идёт ли генерация. Нужен, чтобы после смены темы (страница пересоздаётся, кнопка
+        # снова активна) нельзя было запустить вторую генерацию поверх первой.
+        self._busy = False
+
         # ── Настройки: окно правит свою копию, в рабочие (core_config.CONFIG) и в файл они
         # попадают при сохранении. Файл создаётся при первом сохранении, не при запуске.
         self.cfg: dict = copy.deepcopy(core_config.get_config())
+        # Проблемы файла настроек (испорчен, неверный раздел) — показываем в окне, а не в
+        # консоли: в собранной программе консоли нет. Копируем сразу: load_config очищает список.
+        self._startup_warnings: list = list(core_config.LOAD_WARNINGS)
 
         # ── Тема из сохранённого состояния (gui_state.json создаётся при первом сохранении)
         self._active      = "generate"
@@ -136,6 +163,13 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         # Рабочие потоки не трогают Tk: они кладут задания сюда, а выполняет их главный поток.
         self.ui_queue = MainThreadQueue(self)
         self.ui_queue.start()
+
+        if self._startup_warnings:
+            self.after(300, self._show_startup_warnings)
+
+    def _show_startup_warnings(self) -> None:
+        messagebox.showwarning("Файл настроек", "\n\n".join(self._startup_warnings))
+        self._startup_warnings = []
 
     # ── Тема ──────────────────────────────────────────────────────────────────
 
@@ -180,6 +214,10 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         self._setup_logging()
         self._load_state()
         self._nav_to(active)
+
+        if self._busy:
+            # Генерация идёт в фоне: на новой странице кнопка должна быть заблокирована
+            self.generate_page.run_btn.configure(state="disabled", text="⏳   Обработка…")
 
     # ── Разметка ──────────────────────────────────────────────────────────────
 
@@ -468,7 +506,9 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             rules    = norms.rules_for_display(self.cfg)
         self._collect_page_settings(base_val, rules)
 
-    def _save_config(self) -> None:
+    def _save_config_quiet(self) -> bool:
+        """Проверяет значения на страницах, применяет их и записывает файл.
+        Ошибки показывает сама (окном). True — настройки сохранены."""
         # 1. Валидация норм
         np = self.norms_page
         try:
@@ -476,17 +516,20 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             rules    = norms.parse_norm_rules(np.get_rule_rows())
         except norms.NormsError as e:
             messagebox.showerror("Ошибка в нормах часов", str(e))
-            return
+            return False
 
         # 2. Фиксируем данные из страниц в self.cfg
         try:
             self._collect_page_settings(base_val, rules)
         except ValueError as e:
             messagebox.showerror("Ошибка в праздничных днях", str(e))
-            return
+            return False
 
         # 3. Запись на диск и применение
-        if self._force_sync_config():
+        return self._force_sync_config()
+
+    def _save_config(self) -> None:
+        if self._save_config_quiet():
             messagebox.showinfo("Сохранено", "✓  Настройки успешно сохранены.")
 
     # ── Синхронизация конфига с модулями парсера ──────────────────────────────
@@ -549,6 +592,10 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
     # ── Генерация ─────────────────────────────────────────────────────────────
 
     def _start(self) -> None:
+        if self._busy:
+            messagebox.showinfo("Генерация идёт", "Табель уже формируется — дождитесь окончания.")
+            return
+
         gp   = self.generate_page
         src  = gp.src_entry.get().strip()
         tpl  = gp.tpl_entry.get().strip()
@@ -594,9 +641,24 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
             messagebox.showerror("Нельзя сохранить результат", str(e))
             return
 
+        # Правки на страницах настроек, которые не сохранены кнопкой «Сохранить настройки»,
+        # в генерации не участвуют. Не даём этому случиться молча.
+        changed = self._unsaved_settings()
+        if changed:
+            if not messagebox.askyesno(
+                "Несохранённые настройки",
+                f"Изменены, но не сохранены настройки: {_section_names(changed)}.\n\n"
+                "Сохранить их и продолжить генерацию?\n"
+                "(«Нет» — вернуться, чтобы проверить настройки.)",
+            ):
+                return
+            if not self._save_config_quiet():
+                return
+
         self._save_state()
         self._force_sync_config()
 
+        self._busy = True
         gp.run_btn.configure(state="disabled", text="⏳   Обработка…")
         gp.set_status("Читаю файлы…", T("ACCENT_LIGHT"))
         gp.progress.configure(mode="determinate")
@@ -652,6 +714,7 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
         messagebox.showerror("Ошибка", str(err))
 
     def _reset_ui(self) -> None:
+        self._busy = False
         gp = self.generate_page
         gp.progress.set(0)
         gp.progress.configure(mode="indeterminate")
@@ -660,20 +723,32 @@ class CityClinicApp(ctk.CTk, UIHelpersMixin):
     # ── Закрытие ──────────────────────────────────────────────────────────────
 
     def _unsaved_settings(self) -> list:
-        """Разделы настроек, изменённые в окне, но не записанные в файл (все, а не только цвета)."""
+        """Разделы настроек, изменённые в окне, но не записанные в файл (все, а не только цвета).
+
+        Проверка только читает: self.cfg после неё остаётся таким, каким был. Иначе правки,
+        от которых пользователь отказался, оказались бы в self.cfg и ушли в файл со следующим
+        выбором цвета."""
+        saved_cfg = copy.deepcopy(self.cfg)
         try:
             self._snapshot_pages_into_cfg()
             return cfgdiff.unsaved_sections(self.cfg, core_config.load_config())
+        except ValueError:
+            # Правка есть, но она некорректна (например, год праздника — не число): собрать её
+            # в настройки нельзя, значит она точно не сохранена.
+            return ["holidays_by"]
         except Exception as e:      # не удалось сравнить — не мешаем закрыть окно
             gen_log.warning(f"Не удалось проверить несохранённые настройки: {e}")
             return []
+        finally:
+            self.cfg.clear()
+            self.cfg.update(saved_cfg)
 
     def _on_close(self) -> None:
         changed = self._unsaved_settings()
         if changed:
             if not messagebox.askyesno(
                 "Несохранённые изменения",
-                "Есть несохранённые изменения настроек.\n\nВыйти без сохранения?",
+                f"Есть несохранённые изменения настроек: {_section_names(changed)}.\n\nВыйти без сохранения?",
             ):
                 return
 
