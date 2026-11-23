@@ -31,6 +31,7 @@ from . import excel_io, norms
 from .config import CONFIG
 from .models import DiagReport, DoctorRecord, Shift
 from .utils import calculate_total_hours, combine_times, yo_to_ye
+from .xlsx_slim import load_sheet_workbook, sheet_names
 
 # Тот же логгер, что у генерации: GUI привязывает лог страницы «Генерация»
 # к core.auto_schedule (см. gui/log_handler.py: GENERATE_LOGGERS).
@@ -184,10 +185,17 @@ def _parse_legacy_sheet(ws) -> List[DoctorRecord]:
 def parse_dental_source(source_file: str, month_str: str, progress_cb=None) -> List[DoctorRecord]:
     """Читает лист месяца из графика стоматологии. Все записи получают
     direction = DENTAL_DIRECTION — по нему auto_schedule отделяет их от остальных."""
-    wb = load_workbook(source_file, data_only=True)
+    names = sheet_names(source_file)
+    if names is None:               # не .xlsx или нестандартный файл — открываем целиком, как раньше
+        full = load_workbook(source_file, data_only=True)
+        names = full.sheetnames
+        full.close()
+    title = find_month_sheet(names, month_str)
+
+    # Остальные листы книги не разбираются: график стоматологии тоже растёт с каждым месяцем.
+    wb = load_sheet_workbook(source_file, title)
     legacy_records: Optional[List[DoctorRecord]] = None
     try:
-        title = find_month_sheet(wb.sheetnames, month_str)
         labels = _col_a_labels(wb[title])
         if "специалист" in labels and "дата" in labels:
             pass  # новая раскладка — читаем ниже общим разбором

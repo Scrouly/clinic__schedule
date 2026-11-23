@@ -10,7 +10,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
-from openpyxl import load_workbook
 from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -23,6 +22,7 @@ from .config import CONFIG
 from .models import DoctorRecord, Shift
 from .utils import (combine_times, calculate_total_hours, normalize_time_legacy, yo_to_ye, calculate_monthly_norm,
                     is_holiday, normalize_name, parse_time_intervals)
+from .xlsx_slim import load_sheet_workbook
 from .xlstyle import styles_for
 
 logger = logging.getLogger(__name__)
@@ -53,8 +53,11 @@ def load_excel_with_merges(file_path: str, sheet_name: str) -> List[List[Any]]:
     """Лист как прямоугольная сетка значений (список строк), объединённые ячейки заполнены.
 
     Хвостовые пустые строки и столбцы отрезаются, ведущие остаются; пустые ячейки — None.
-    Ошибки (#N/A…) и «NA»-подобный текст тоже превращаются в None, но размер сетки задают."""
-    wb = load_workbook(file_path, data_only=True)
+    Ошибки (#N/A…) и «NA»-подобный текст тоже превращаются в None, но размер сетки задают.
+
+    Остальные листы книги не разбираются (см. core/xlsx_slim.py): сводный график — это 12+ листов
+    по несколько мегабайт, и разбор всех ради одного занимал около 20 секунд."""
+    wb = load_sheet_workbook(file_path, sheet_name)
     try:
         ws = wb[sheet_name]
         grid = []
@@ -358,7 +361,6 @@ def _day_type(year_num: int, month_num: int, day: int, transfers_work: list, tra
 
 def _paint_day_header(ws, day_row_num: int, days_in_month: int, get_col, year_num: int, month_num: int,
                       transfers_work: list, transfers_rest: list, pink_fill, gray_fill) -> None:
-    from openpyxl.styles import Alignment
     header_alignment = Alignment(horizontal='center', vertical='center')
 
     for day in range(1, 32):
