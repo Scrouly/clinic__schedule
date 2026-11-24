@@ -1,5 +1,6 @@
 """Общие фикстуры: изолируем тесты от реального auto_schedule_config.json."""
 import atexit
+import logging
 import os
 import shutil
 import tempfile
@@ -14,6 +15,19 @@ os.environ["CITYCLINIC_CONFIG"] = os.path.join(_CFG_DIR, "auto_schedule_config.j
 import pytest  # noqa: E402
 
 from core import utils  # noqa: E402
+
+_CORE_LOGGERS = ("core", "core.auto_schedule", "core.excel_io", "core.compare_schedules")
+
+
+@pytest.fixture(autouse=True)
+def _restore_core_logger_levels():
+    """bind_textbox() поднимает уровень логгера до INFO, если он был выше. Без возврата
+    уровня это «утекает» в соседние тесты: test_logging_levels (DEBUG в файл) падает,
+    если test_logging_wiring выполнился раньше (например, при запуске двух файлов подряд)."""
+    saved = {name: logging.getLogger(name).level for name in _CORE_LOGGERS}
+    yield
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
 
 
 @pytest.fixture
